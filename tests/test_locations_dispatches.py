@@ -2,6 +2,8 @@ import os
 import tempfile
 import unittest
 
+import ming_sim.session as session_module
+from ming_sim.flows import period_amount
 from ming_sim.models import LLMConfig
 from ming_sim.session import GameSession
 
@@ -123,6 +125,94 @@ class LocationDispatchTests(unittest.TestCase):
             self.assertEqual(dispatches[0]["destination_location"], "guangdong")
             row = db.conn.execute("SELECT COUNT(*) AS n FROM court_events WHERE source_kind='decree'").fetchone()
             self.assertEqual(int(row["n"]), 0)
+        finally:
+            session.close()
+
+    def test_period_amount_daily_slices_sum_to_monthly_total(self) -> None:
+        self.assertEqual(sum(period_amount(100, day, 30) for day in range(1, 31)), 100)
+        self.assertEqual(sum(period_amount(8, day, 30) for day in range(1, 31)), 8)
+
+    def test_end_day_runs_daily_settlement_and_advances_to_next_day(self) -> None:
+        session = self.make_session()
+        original_day_end = session_module.resolve_day_end
+        original_month_summary = session_module.resolve_month_summary
+        calls = []
+
+        def fake_day_end(state, db, *args, **kwargs):
+            calls.append(("day", state.turn, state.day))
+            db.save_turn_report(state, "daily report")
+            return "daily report"
+
+        def fake_month_summary(*args, **kwargs):
+            calls.append(("summary",))
+            return "summary"
+
+        session_module.resolve_day_end = fake_day_end
+        session_module.resolve_month_summary = fake_month_summary
+        try:
+            start_turn = session.state.turn
+            report = session.end_day()
+            self.assertEqual(report, "daily report")
+            self.assertEqual(session.state.turn, start_turn + 1)
+            self.assertEqual(session.state.day, 2)
+            self.assertEqual(calls, [("day", start_turn, 1)])
+        finally:
+            session_module.resolve_day_end = original_day_end
+            session_module.resolve_month_summary = original_month_summary
+            session.close()
+
+    def test_month_end_adds_summary_without_skipping_daily_settlement(self) -> None:
+        session = self.make_session()
+        original_day_end = session_module.resolve_day_end
+        original_month_summary = session_module.resolve_month_summary
+        calls = []
+
+        def fake_day_end(state, db, *args, **kwargs):
+            calls.append(("day", state.turn, state.day, state.period))
+            db.save_turn_report(state, "day thirty")
+            return "day thirty"
+
+        def fake_month_summary(state, db, *args, daily_report="", **kwargs):
+            calls.append(("summary", state.turn, state.day, state.period, daily_report))
+            db.save_turn_report(state, daily_report + "\nsummary")
+            return daily_report + "\nsummary"
+
+        session_module.resolve_day_end = fake_day_end
+        session_module.resolve_month_summary = fake_month_summary
+        try:
+            session.state.day = 30
+            session.state.turn += 29
+            session.db.save_state(session.state)
+            start_turn = session.state.turn
+            start_period = session.state.period
+            report = session.end_day()
+            self.assertIn("summary", report)
+            self.assertEqual(session.state.turn, start_turn + 1)
+            self.assertEqual(session.state.day, 1)
+            self.assertEqual(session.state.period, start_period + 1)
+            self.assertEqual(
+                calls,
+                [
+                    ("day", start_turn, 30, start_period),
+                    ("summary", start_turn, 30, start_period, "day thirty"),
+                ],
+            )
+        finally:
+            session_module.resolve_day_end = original_day_end
+            session_module.resolve_month_summary = original_month_summary
+            session.close()
+
+    def test_secret_order_progress_is_limited_per_day_not_per_month(self) -> None:
+        session = self.make_session()
+        db = session.db
+        try:
+            order_id = db.create_secret_order(session.state, "张瑞图", "密查", "密查京中风声。", [], deadline_months=1)
+            self.assertTrue(db.update_secret_order_progress(order_id, "初查", session.state.year, session.state.period, day=1))
+            self.assertFalse(db.update_secret_order_progress(order_id, "再查", session.state.year, session.state.period, day=1))
+            self.assertTrue(db.update_secret_order_progress(order_id, "次日续查", session.state.year, session.state.period, day=2))
+            order = db.get_secret_order(order_id)
+            self.assertIn("1日", order["result"])
+            self.assertIn("2日", order["result"])
         finally:
             session.close()
 

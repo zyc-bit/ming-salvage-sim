@@ -351,6 +351,19 @@ def simulate_season_with_payload(
             "本月 court_events 里的即时事件已经逐次落数，只可概括其过程，"
             "不得把这些召对/诏令的硬效果重复写成新落账；重点处理固定收支、局势自然惯性、到期密令与候选历史情势。"
         )
+    elif mode == "day_end":
+        instruction = (
+            "日终退朝模式：只写当前这一天的日终奏报。"
+            "fixed_flows 已按日切片落账；court_events 里的即时事件已经逐次落数，只可概括其过程，"
+            "不得把这些召对/诏令的硬效果重复写成新落账。"
+            "只推进当前一日内自然发生、到期密令核议和候选情势，篇幅控制在 500-1000 字。"
+        )
+    elif mode == "month_summary":
+        instruction = (
+            "月末总结模式：只根据 simulator_payload.daily_reports 和当前盘面写本月总结。"
+            "本月每日结算已经完成，禁止新增硬效果，禁止再写固定收支落账、issue 新推进、"
+            "密令新结案或候选历史情势的新发生。输出应是总结报告，不是结算奏章。"
+        )
     else:
         instruction = "请根据 system 中的 simulator_payload 写本月月末奏章。"
     raw = run_agent_stream_text(

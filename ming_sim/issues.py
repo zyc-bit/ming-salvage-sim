@@ -22,6 +22,8 @@ from ming_sim.flows import (
     _apply_economy_list,
     _apply_faction_dict,
     _apply_metric_dict,
+    period_amount,
+    signed_period_amount,
 )
 from ming_sim.models import Event, GameState
 
@@ -1032,7 +1034,7 @@ def apply_score_extraction(
             continue
         try:
             db.update_secret_order_sim_note(
-                real_id, sim_note, year=state.year, period=state.period
+                real_id, sim_note, year=state.year, period=state.period, day=state.day
             )
             print(f"[secret_order] 推演副作用 id={real_id} note={sim_note[:60]!r}")
             applied_secret_orders.append({"order_id": real_id, "sim_note": sim_note})
@@ -1103,22 +1105,26 @@ def apply_issue_inertia_and_ongoing(
     db: GameDB,
     state: GameState,
     touched_ids: Optional[set] = None,
+    period_days: int = 1,
 ) -> None:
-    # inertia 是每月自然漂移基础量，对所有进行中 issue 都生效（含本月被 advance 触动的）。
-    # advance 的 delta_bar 是皇帝本月实旨推动的额外量，与 inertia 叠加，互不顶替。
+    # inertia 是每月自然漂移基础量；日结时按 30 天切片，避免每日推演放大总量。
+    # advance 的 delta_bar 是皇帝实旨/推演推动的额外量，与 inertia 叠加，互不顶替。
     _ = touched_ids  # 保留入参不破坏调用方；inertia 漂移不再按它跳过
     active = db.list_active_issues()
     # 累计单月 metric 落账，用于上限 clamp
     period_metric_acc: Dict[str, int] = {}
+    days = max(1, int(period_days or 1))
+    unit = "日" if days > 1 else TURN_UNIT
 
     for row in active:
         issue_id = int(row["id"])
         bar = int(row["bar_value"])
         inertia = int(row["inertia"])
 
-        # 1) inertia 漂移：每月对所有进行中 issue 都走一格
-        if inertia != 0:
-            new_bar = max(0, min(100, bar + inertia))
+        # 1) inertia 漂移：每月总量按日切片
+        inertia_delta = signed_period_amount(inertia, int(state.day), days)
+        if inertia_delta != 0:
+            new_bar = max(0, min(100, bar + inertia_delta))
             actual = new_bar - bar
             if actual != 0:
                 new_row = db.advance_issue(
@@ -1126,7 +1132,7 @@ def apply_issue_inertia_and_ongoing(
                     trigger_kind="inertia",
                     delta_bar=actual,
                     stage_text=row["stage_text"],
-                    narrative="局势自有其势，本月按其本然推移。",
+                    narrative=f"局势自有其势，本{unit}按其本然推移。",
                     metric_delta={},
                 )
                 if new_row is None:
@@ -1172,10 +1178,14 @@ def apply_issue_inertia_and_ongoing(
                 raw = int(v)
             except (TypeError, ValueError):
                 continue
-            scaled = int(round(raw * scale))
+            monthly_scaled = int(round(raw * scale))
+            scaled = signed_period_amount(monthly_scaled, int(state.day), days)
             if scaled == 0:
                 continue
-            cap = ISSUE_METRIC_LOCK_CAPS.get(k, 5)
+            monthly_cap = ISSUE_METRIC_LOCK_CAPS.get(k, 5)
+            cap = period_amount(monthly_cap, int(state.day), days)
+            if cap <= 0:
+                continue
             already = period_metric_acc.get(k, 0)
             remaining = cap - abs(already)
             if remaining <= 0:
@@ -1191,7 +1201,21 @@ def apply_issue_inertia_and_ongoing(
             metric_part[k] = allowed
 
         # economy
-        economy_part = _apply_economy_list(db, state, ongoing.get("economy") or [])
+        economy_items: List[Dict[str, object]] = []
+        for move in ongoing.get("economy") or []:
+            if not isinstance(move, dict):
+                continue
+            try:
+                monthly_delta = int(move.get("delta") or 0)
+            except (TypeError, ValueError):
+                continue
+            daily_delta = signed_period_amount(monthly_delta, int(state.day), days)
+            if daily_delta == 0:
+                continue
+            copied = dict(move)
+            copied["delta"] = daily_delta
+            economy_items.append(copied)
+        economy_part = _apply_economy_list(db, state, economy_items)
 
         if metric_part or economy_part:
             db.conn.execute(
@@ -1203,7 +1227,7 @@ def apply_issue_inertia_and_ongoing(
                 """,
                 (
                     issue_id, state.turn, bar, bar,
-                    f"持续效果落账 (折扣 {int(scale*100)}%)",
+                    f"持续效果落账 ({unit}折扣 {int(scale*100)}%)",
                     json.dumps({"metrics": metric_part, "economy": economy_part}, ensure_ascii=False),
                 ),
             )

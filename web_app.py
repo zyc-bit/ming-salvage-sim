@@ -644,9 +644,8 @@ class WebGame:
             account["income_total"] = income_total
             account["expense_total"] = expense_total
             account["net"] = income_total - expense_total
-        # 本月入账（上月末结算）：上月末 LLM 推演 + 固定财政 tick 落的 ledger
-        # 时序上 state.turn 在结算末尾 +1 进入新月，所以"本月可见的入账"是 cur_turn - 1 的 ledger。
-        # 语义对齐玩家直觉："上月末抄家/清丈的钱，算这个月的收入"。
+        # 上日入账：日终 LLM 推演 + 固定财政日 tick 落的 ledger。
+        # 时序上 state.turn 在结算末尾 +1 进入次日，所以"今日可见的入账"是 cur_turn - 1 的 ledger。
         # 过滤掉固定收支（已在上方"固定收入/固定支出"展示），只列一次性流水
         # （清丈追缴、抄家、赈济临支、亏空压力等 LLM 推演产物）。
         FIXED_CATEGORIES = {
@@ -656,7 +655,7 @@ class WebGame:
             # 内库固定
             "皇庄", "织造", "矿税",
             "宫廷开支", "内廷俸禄", "妃嫔供奉",
-            # 建筑（每月固定 tick）
+            # 建筑（固定 tick）
             "建筑产出", "建筑维护",
             # 开局初始账册
             "期初",
@@ -723,6 +722,7 @@ class WebGame:
             "today_events": today_events,
             "court_events": self.db.list_court_events(year=self.state.year, period=self.state.period, limit=80),
             "month_end_due": int(self.state.day) >= 30,
+            "month_summary_due": int(self.state.day) >= 30,
             "last_decree": self.last_decree,
             "last_report": self.last_report,
             "dispatches": self.db.list_dispatches(statuses=("in_transit", "delivered"), limit=80),
@@ -930,7 +930,7 @@ class WebGame:
                                 args = getattr(tool_exec, "arguments", {}) or getattr(tool_exec, "tool_args", {}) or {}
                                 payload_json = json.dumps(args, ensure_ascii=False)
                             secret_order_id = self.session._apply_secret_order(payload_json, minister_name)
-                    # 密令结案不再走大臣工具，由月末推演 + extractor 写入
+                    # 密令结案不再走大臣工具，由日终推演 + extractor 写入
             payload = self._chat_payload(
                 minister_name, answer, court_action=court_action, next_minister=next_minister,
                 proposed_directive=proposed, appointed_minister=appointed,
@@ -954,7 +954,7 @@ class WebGame:
         ]
         skill_ids = set(available_skill_ids(character, self.db))
         if "check_treasury" in skill_ids:
-            suggestions.insert(1, {"label": "查钱粮", "text": "太仓和内库实数如何？本月哪些钱最急？"})
+            suggestions.insert(1, {"label": "查钱粮", "text": "太仓和内库实数如何？今日哪些钱最急？"})
         if "check_military" in skill_ids or "front_line_plan" in skill_ids or "strategic_review" in skill_ids:
             suggestions.insert(1, {"label": "查驻军", "text": "查一下关宁军、京营和陕西边军的士气、欠饷与补给。"})
         if "secret_investigation" in skill_ids:
@@ -1269,11 +1269,13 @@ async def api_history_turn(turn: int) -> Dict[str, Any]:
     if extraction is not None:
         decree_text = str(extraction.get("decree_text") or "")
         extraction["exists"] = True
+    cal = db.conn.execute("SELECT day FROM turn_calendar WHERE turn = ?", (int(turn),)).fetchone()
     return {
         "turn": turn,
         "exists": True,
         "year": extraction["year"] if extraction else (directives[0]["year"] if directives else 0),
         "period": extraction["period"] if extraction else (directives[0]["period"] if directives else 0),
+        "day": int(cal["day"]) if cal else 0,
         "report": report,
         "decree_text": decree_text,
         "directives": directives,
@@ -1516,7 +1518,7 @@ async def api_issue_decree_stream() -> StreamingResponse:
 
 @app.post("/api/day/end/stream")
 async def api_end_day_stream() -> StreamingResponse:
-    """退朝至明日；若当前是第 30 日，流式跑月终结算。"""
+    """退朝至明日；每日流式跑日终结算，第 30 日额外生成月末总结。"""
     ev_queue: "queue.Queue[tuple[str, Any]]" = queue.Queue()
 
     def on_event(kind: str, data: str) -> None:

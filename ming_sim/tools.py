@@ -547,7 +547,7 @@ def build_minister_tools(character: Character, context: CourtContext):
         content：密令详情，交代任务目标、保密要求、期限等。
         tags_json：JSON 数组，填相关人名/地区/事项关键词，用于日后检索，如 '["辽饷","兵部","密查"]'。
         assignee：实际承办人姓名。留空则默认为当前召见的大臣；若皇帝指名他人承办（如"命毕自严去查"），填该人全名。
-        deadline_months：硬期限月数；0 表示无硬期限。若皇帝说"下月务必结案"填 1，说"三个月内结案"填 3。
+        deadline_months：硬期限月数；0 表示无硬期限。若皇帝说"一月内务必结案"填 1，说"三个月内结案"填 3。
         """
         t = (title or "").strip()[:20]
         c = (content or "").strip()
@@ -590,14 +590,14 @@ def build_minister_tools(character: Character, context: CourtContext):
         return order, ""
 
     def report_secret_order_progress(order_id: int, progress: str = "") -> str:
-        """皇帝问密令进度时调本工具——一步完成"查历史 + 落本月新进展"。
-        - progress 非空且本月尚未推进且非建档当月 → 直接把本月这一步落档；
-        - progress 为空、本月已推进、或本月即建档当月 → 只回历史不落档；
-        **建档当月不能立刻推进**（领旨待办，下月起查）。
-        **一个月最多落一步**。结案另用 report_secret_order_result。
+        """皇帝问密令进度时调本工具——一步完成"查历史 + 落本日新进展"。
+        - progress 非空且本日尚未推进且非建档当日 → 直接把本日这一步落档；
+        - progress 为空、本日已推进、或本日即建档当日 → 只回历史不落档；
+        **建档当日不能立刻推进**（领旨待办，后续日程再查）。
+        **一日最多落一步**。结案另用 submit_secret_order_for_review。
 
         order_id：密令编号。
-        progress：本月新查到的一步进展（100字内，顺着已有线索往下推一步）。仅查无需写时可省略。
+        progress：本日新查到的一步进展（100字内，顺着已有线索往下推一步）。仅查无需写时可省略。
         """
         order, err = _own_secret_order(order_id)
         if order is None:
@@ -605,35 +605,35 @@ def build_minister_tools(character: Character, context: CourtContext):
         if order["status"] != "active":
             return f"密令 #{order['id']} 已{order['status']}，不能再记进展。"
         already_advanced = context.db._has_secret_order_period_line(
-            order["id"], "result", context.state.year, context.state.period
+            order["id"], "result", context.state.year, context.state.period, context.state.day
         )
         is_issuing_turn = int(order.get("turn_issued") or 0) == int(context.state.turn)
         note = (progress or "").strip()[:200]
         saved = False
         if note and not already_advanced and not is_issuing_turn:
             saved = context.db.update_secret_order_progress(
-                order["id"], note, year=context.state.year, period=context.state.period
+                order["id"], note, year=context.state.year, period=context.state.period, day=context.state.day
             )
-        # 落档后重读，让返回里的"查办经过"包含本月这一行
+        # 落档后重读，让返回里的"查办经过"包含本日这一行
         order = context.db.get_secret_order(order["id"]) or order
         parts = [f"密令 #{order['id']}「{order['title']}」状态：{order['status']}。"]
-        parts.append(f"查办经过（按月，末行最新）：\n{order['result'] or '尚无进展记录。'}")
+        parts.append(f"查办经过（按日，末行最新）：\n{order['result'] or '尚无进展记录。'}")
         if order.get("sim_note"):
-            parts.append(f"外间动静（按月，末行最新）：\n{order['sim_note']}")
+            parts.append(f"外间动静（按日，末行最新）：\n{order['sim_note']}")
         if saved:
-            parts.append(f"✅ 本月新进展已落档：{note}")
+            parts.append(f"✅ 本日新进展已落档：{note}")
         elif is_issuing_turn:
-            parts.append("⚠️ 本月即建档当月，密令刚刚下达，眼下只能领旨筹备、布置人手，须待下月起才可查得头绪——本次未落档。回奏陛下时坦言「才接旨、尚未动身查访」即可。")
+            parts.append("⚠️ 本日刚接密令，眼下只能领旨筹备、布置人手，须待后续日程才可查得头绪——本次未落档。回奏陛下时坦言「才接旨、尚未动身查访」即可。")
         elif already_advanced:
-            parts.append("⚠️ 本月已查进一步，欲再进须待下月——本次未再落档。")
+            parts.append("⚠️ 本日已查进一步，欲再进须待明日或后续通信——本次未再落档。")
         elif not note:
-            parts.append("ℹ️ 未提供 progress 参数，本月仍未推进；下次调用请填 progress 把本月新一步落档。")
+            parts.append("ℹ️ 未提供 progress 参数，本日仍未推进；下次调用请填 progress 把本日新一步落档。")
         return "\n".join(parts)
 
     def submit_secret_order_for_review(order_id: int, claim: str) -> str:
         """承办人自认任务办到位（或无法再推）时调本工具，把密令转入"待核议"，等推演据全盘面判最终成败。
         **大臣无权直接定 done/failed**——结案权归推演（season simulator），它会看承办人能力、目标实力、风声、派系反扑、可行性等因素，
-        在月末邸报「密旨核议」章给出真实判定（实据齐 → done；不可行/虚报/反扑 → failed；仍需继续 → 退回 active）。
+        在日终奏报「密旨核议」章给出真实判定（实据齐 → done；不可行/虚报/反扑 → failed；仍需继续 → 退回 active）。
 
         order_id：密令编号。
         claim：你自述的办结陈词（200字内）。要写：声称已查得/办到的事实、关键证据、附带情况（如风声暴露程度、有无反扑迹象）。
@@ -648,17 +648,17 @@ def build_minister_tools(character: Character, context: CourtContext):
         if not text:
             return "提交失败：claim 为空，须写明你声称办到了什么。"
         ok = context.db.submit_secret_order_for_review(
-            order["id"], text, year=context.state.year, period=context.state.period
+            order["id"], text, year=context.state.year, period=context.state.period, day=context.state.day
         )
         if not ok:
             return f"密令 #{order['id']} 提交失败（当前状态非 active）。"
-        return f"密令 #{order['id']}「{order['title']}」已提交待推演核议，本月不再可推进。陛下可静候月末邸报「密旨核议」章定夺。"
+        return f"密令 #{order['id']}「{order['title']}」已提交待推演核议，本日不再可推进。陛下可静候日终奏报「密旨核议」章定夺。"
 
     def rush_secret_order(order_id: int, deadline_months: int = 1, reason: str = "") -> str:
         """皇帝催办/加急某条密令时调用，缩短硬期限。
 
         order_id：密令编号。
-        deadline_months：从本月起还给几个月。1=下月/一个月内必须核议；0=本月立即送月末核议。
+        deadline_months：从今日起还给几个月。1=约一月内必须核议；0=本日立即送日终核议。
         reason：皇帝催办缘由或新限令，100字内。
         """
         order, err = _own_secret_order(order_id)
@@ -673,9 +673,9 @@ def build_minister_tools(character: Character, context: CourtContext):
         except Exception as exc:
             return f"密令 #{order['id']} 催办失败：{exc}"
         if rushed["status"] == "pending_review":
-            return f"密令 #{order['id']}「{order['title']}」已奉旨即核，转入待核议；本月月末推演必须判 done/failed。"
+            return f"密令 #{order['id']}「{order['title']}」已奉旨即核，转入待核议；本日日终推演必须判 done/failed。"
         remain = max(0, int(rushed["due_turn"]) - int(context.state.turn))
-        return f"密令 #{order['id']}「{order['title']}」已奉旨加急，限 {remain} 个月内核议。"
+        return f"密令 #{order['id']}「{order['title']}」已奉旨加急，限 {remain} 日内核议。"
 
     def dismiss_minister() -> str:
         """结束本次召见。"""

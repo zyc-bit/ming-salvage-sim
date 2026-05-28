@@ -128,6 +128,25 @@ ARMY_SALARY_PRIORITY = [
 ]
 
 
+def period_amount(amount: int, day: int, period_days: int = 1) -> int:
+    """Return today's integer slice of a period amount.
+
+    The cumulative formula guarantees that all daily slices add back to the
+    original monthly amount across a 30-day month.
+    """
+    amount = max(0, int(amount or 0))
+    days = max(1, int(period_days or 1))
+    if days <= 1:
+        return amount
+    current_day = max(1, min(days, int(day or 1)))
+    return (amount * current_day // days) - (amount * (current_day - 1) // days)
+
+
+def signed_period_amount(amount: int, day: int, period_days: int = 1) -> int:
+    sign = -1 if int(amount or 0) < 0 else 1
+    return sign * period_amount(abs(int(amount or 0)), day, period_days)
+
+
 def _apply_metric_dict(
     state: GameState, metric_delta: Dict[str, object], caps: Optional[Dict[str, int]] = None
 ) -> Dict[str, int]:
@@ -295,45 +314,60 @@ def _apply_economy_list(
     return applied
 
 
-def apply_fixed_period_flows(db: GameDB, state: GameState) -> List[Dict[str, object]]:
-    """月度财政 tick：把原月度固定收支按月切分，在 LLM 推演前落账。"""
+def apply_fixed_period_flows(
+    db: GameDB,
+    state: GameState,
+    period_days: int = 1,
+    period_label: Optional[str] = None,
+) -> List[Dict[str, object]]:
+    """固定财政 tick。
+
+    默认保留原月度行为；period_days=30 时按当前日切成日额落账。
+    """
     cfg = db.get_fiscal_config()
     flows: List[Dict[str, object]] = []
+    days = max(1, int(period_days or 1))
+    unit = period_label or ("日" if days > 1 else TURN_UNIT)
+
+    def _slice(amount: int) -> int:
+        return period_amount(amount, int(state.day), days)
 
     def _income(account: str, amount: int, category: str, reason: str) -> None:
+        amount = _slice(amount)
         if amount <= 0:
             return
         actual = db.record_issue_economy_move(state, account, amount, category, reason)
         flows.append({"dir": "income", "account": account, "amount": actual,
-                      "category": category, "reason": reason})
+                      "category": category, "reason": reason, "period_days": days})
 
     def _expense(account: str, amount: int, category: str, reason: str) -> None:
+        amount = _slice(amount)
         if amount <= 0:
             return
         actual = db.record_issue_economy_move(state, account, -amount, category, reason)
         flows.append({"dir": "expense", "account": account, "amount": abs(actual),
-                      "category": category, "reason": reason})
+                      "category": category, "reason": reason, "period_days": days})
 
     # ── 国库/内库收入（省级动态计算）─────────────────────────────────────────
     guo_income, nei_income, _province_details = calc_province_fiscal(state, db)
-    _income("国库", guo_income, "田赋辽饷盐商", f"两京十三省{TURN_UNIT}综合税收实入")
-    _income("内库", nei_income, "皇庄",         f"北直隶皇庄{TURN_UNIT}地租")
+    _income("国库", guo_income, "田赋辽饷盐商", f"两京十三省{unit}综合税收实入")
+    _income("内库", nei_income, "皇庄",         f"北直隶皇庄{unit}地租")
 
     # ── 国库支出（非军饷）────────────────────────────────────────────────────
-    _expense("国库", monthly_amount(round(cfg["宗室禄米_base"] * cfg["宗室禄米_rate"] / 100)), "宗室禄米", f"诸藩宗室{TURN_UNIT}禄米")
-    _expense("国库", monthly_amount(round(cfg["官俸_base"]     * cfg["官俸_rate"]     / 100)), "百官俸禄", f"在京百官{TURN_UNIT}俸禄")
-    _expense("国库", monthly_amount(round(cfg["工程_base"]     * cfg["工程_rate"]     / 100)), "工部",     f"工部{TURN_UNIT}维护支出")
-    _expense("国库", monthly_amount(round(cfg["赈灾_base"]     * cfg["赈灾_rate"]     / 100)), "赈灾备用", f"制度性{TURN_UNIT}赈灾预留")
+    _expense("国库", monthly_amount(round(cfg["宗室禄米_base"] * cfg["宗室禄米_rate"] / 100)), "宗室禄米", f"诸藩宗室{unit}禄米")
+    _expense("国库", monthly_amount(round(cfg["官俸_base"]     * cfg["官俸_rate"]     / 100)), "百官俸禄", f"在京百官{unit}俸禄")
+    _expense("国库", monthly_amount(round(cfg["工程_base"]     * cfg["工程_rate"]     / 100)), "工部",     f"工部{unit}维护支出")
+    _expense("国库", monthly_amount(round(cfg["赈灾_base"]     * cfg["赈灾_rate"]     / 100)), "赈灾备用", f"制度性{unit}赈灾预留")
 
     # ── 内库收入 ──────────────────────────────────────────────────────────────
-    _income("内库", monthly_amount(round(cfg["皇庄_base"]  * cfg["皇庄_rate"]  / 100)), "皇庄",   f"皇庄地租{TURN_UNIT}上缴")
-    _income("内库", monthly_amount(round(cfg["织造_base"]  * cfg["织造_rate"]  / 100)), "织造",   f"苏杭织造局{TURN_UNIT}上缴")
+    _income("内库", monthly_amount(round(cfg["皇庄_base"]  * cfg["皇庄_rate"]  / 100)), "皇庄",   f"皇庄地租{unit}上缴")
+    _income("内库", monthly_amount(round(cfg["织造_base"]  * cfg["织造_rate"]  / 100)), "织造",   f"苏杭织造局{unit}上缴")
     _income("内库", monthly_amount(round(cfg["矿税_base"]  * cfg["矿税_rate"]  / 100)), "矿税",   "矿税残余")
 
     # ── 内库支出 ──────────────────────────────────────────────────────────────
-    _expense("内库", monthly_amount(round(cfg["宫廷_base"]   * cfg["宫廷_rate"]   / 100)), "宫廷开支", f"皇室{TURN_UNIT}用度")
-    _expense("内库", monthly_amount(round(cfg["内廷俸_base"] * cfg["内廷俸_rate"] / 100)), "内廷俸禄", f"太监宫女{TURN_UNIT}俸禄")
-    _expense("内库", monthly_amount(round(cfg["妃嫔_base"]   * cfg["妃嫔_rate"]   / 100)), "妃嫔供奉", f"后宫妃嫔{TURN_UNIT}供奉")
+    _expense("内库", monthly_amount(round(cfg["宫廷_base"]   * cfg["宫廷_rate"]   / 100)), "宫廷开支", f"皇室{unit}用度")
+    _expense("内库", monthly_amount(round(cfg["内廷俸_base"] * cfg["内廷俸_rate"] / 100)), "内廷俸禄", f"太监宫女{unit}俸禄")
+    _expense("内库", monthly_amount(round(cfg["妃嫔_base"]   * cfg["妃嫔_rate"]   / 100)), "妃嫔供奉", f"后宫妃嫔{unit}供奉")
 
     # ── 各军军饷（按优先级，先发当月、余额抵旧欠；不足挂 arrears 累计万两）──
     # arrears 字段语义=累计欠饷万两（整数，无上限）。flows 是唯一变更点：
@@ -351,7 +385,7 @@ def apply_fixed_period_flows(db: GameDB, state: GameState) -> List[Dict[str, obj
     for row in ordered:
         army_id = str(row["id"])
         name = str(row["name"])
-        needed = int(row["maintenance_per_turn"])
+        needed = _slice(int(row["maintenance_per_turn"]))
         if needed <= 0:
             continue
         available = max(0, int(state.metrics["国库"]))
@@ -364,14 +398,15 @@ def apply_fixed_period_flows(db: GameDB, state: GameState) -> List[Dict[str, obj
         # 月固定军饷只发当月，不主动还旧欠。旧欠累积拖着，等玩家下旨拨饷才清。
         if pay_current > 0:
             db.record_issue_economy_move(
-                state, "国库", -pay_current, "各军军饷", f"{name}{TURN_UNIT}军饷"
+                state, "国库", -pay_current, "各军军饷", f"{name}{unit}军饷"
             )
 
         new_arrears = max(0, old_arrears + shortfall)
         if shortfall > 0:
-            morale_delta = -max(1, round(8 * shortfall / needed))
+            monthly_penalty = max(1, round(8 * shortfall / needed))
+            morale_delta = -_slice(monthly_penalty)
         elif old_arrears == 0:
-            morale_delta = +2     # 长期足额且无旧欠：缓慢恢复
+            morale_delta = +_slice(2)     # 长期足额且无旧欠：缓慢恢复
         else:
             morale_delta = 0      # 当月发足但仍有旧欠：不奖励也不惩罚
         new_morale = max(0, min(100, old_morale + morale_delta))
@@ -381,9 +416,9 @@ def apply_fixed_period_flows(db: GameDB, state: GameState) -> List[Dict[str, obj
             (new_arrears, new_morale, army_id),
         )
         if shortfall > 0:
-            reason_tag = f"{TURN_UNIT}军饷欠发{shortfall}万两"
+            reason_tag = f"{unit}军饷欠发{shortfall}万两"
         else:
-            reason_tag = f"{TURN_UNIT}军饷足额"
+            reason_tag = f"{unit}军饷足额"
         db.conn.executemany(
             """INSERT INTO army_logs
                (turn, year, period, army_id, field, old_value, new_value, delta, reason, event_id, edict_id, actor)
@@ -405,6 +440,7 @@ def apply_fixed_period_flows(db: GameDB, state: GameState) -> List[Dict[str, obj
             "shortfall": shortfall,
             "arrears_delta": new_arrears - old_arrears,
             "morale_delta": new_morale - old_morale,
+            "period_days": days,
         })
 
     # ── 建筑：固定产出 + 固定维护（纯程序化，不调 LLM）─────────────────────────
@@ -419,32 +455,37 @@ def apply_fixed_period_flows(db: GameDB, state: GameState) -> List[Dict[str, obj
         name = str(row["name"])
         category = str(row["category"])
         condition = max(0, min(100, int(row["condition"])))
-        maintenance = max(0, int(row["maintenance"]))
+        maintenance = _slice(max(0, int(row["maintenance"])))
         metric = str(row["output_metric"])
         out_base = max(0, int(row["output_amount"]))
-        produced = round(out_base * condition / 100) if metric and out_base else 0
+        produced = _slice(round(out_base * condition / 100)) if metric and out_base else 0
 
         if metric in ("国库", "内库"):
             if produced > 0:
-                db.record_issue_economy_move(state, metric, produced, "建筑产出", f"{name}{TURN_UNIT}产出")
+                db.record_issue_economy_move(state, metric, produced, "建筑产出", f"{name}{unit}产出")
                 flows.append({"dir": "income", "account": metric, "category": "建筑产出",
-                              "building": name, "amount": produced})
+                              "building": name, "amount": produced, "period_days": days})
         elif metric in ("民心", "皇威"):
             if produced > 0:
                 before = int(state.metrics.get(metric, 0))
                 state.metrics[metric] = max(0, min(100, before + produced))
                 flows.append({"dir": "score", "metric": metric, "category": "建筑产出",
-                              "building": name, "amount": state.metrics[metric] - before})
+                              "building": name, "amount": state.metrics[metric] - before, "period_days": days})
 
         if maintenance > 0:
             maint_account = "内库" if category == "内廷" else "国库"
             paid = db.record_issue_economy_move(state, maint_account, -maintenance, "建筑维护",
-                                                f"{name}{TURN_UNIT}维护费")
+                                                f"{name}{unit}维护费")
             flows.append({"dir": "expense", "account": maint_account, "category": "建筑维护",
                           "building": name, "needed": maintenance, "paid": abs(paid),
-                          "shortfall": maintenance - abs(paid)})
+                          "shortfall": maintenance - abs(paid), "period_days": days})
 
     return flows
+
+
+def apply_fixed_daily_flows(db: GameDB, state: GameState) -> List[Dict[str, object]]:
+    """每日固定财政 tick；30 天合计等于原月度固定收支。"""
+    return apply_fixed_period_flows(db, state, period_days=30, period_label="日")
 
 
 def _apply_faction_dict(db: GameDB, faction_delta: Dict[str, object]) -> Dict[str, object]:

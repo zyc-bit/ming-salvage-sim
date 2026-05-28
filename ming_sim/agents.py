@@ -403,6 +403,17 @@ def create_score_extractor_module_agent(
             "月终只抽固定收支之外的月终自然推进、到期密令核议、候选历史情势与确属月终的新后果，"
             "不得重复抽取 court_events 已记录的召对/诏令硬效果。"
         )
+    elif mode == "day_end":
+        extra_instructions.append(
+            "【日终抽取规则】当前是 day_end 模式。只抽当前这一日自然发生的变化、到期密令核议与候选情势；"
+            "fixed_flows 已按日切片落账，不要重复抽固定财政、军饷、建筑维护/产出。"
+            "court_events 中的即时事件已在发生时落数，不得重复抽取其硬效果。"
+        )
+    elif mode == "month_summary":
+        extra_instructions.append(
+            "【月末总结抽取规则】当前是 month_summary 模式。该模式只写总结，不得抽取任何数值、局势、人事、密令或世界推进变化；"
+            "所有字段必须保持为空。"
+        )
     return Agent(
         name=f"档房书办-{module}",
         id=f"score-extractor-{module}",

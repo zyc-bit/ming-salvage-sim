@@ -25,8 +25,9 @@ from ming_sim.context import (
 from ming_sim.db import GameDB, infer_office_type_from_office, normalize_office
 from ming_sim.locations import infer_character_location
 from ming_sim.decree import (
+    resolve_day_end,
     resolve_immediate_event,
-    resolve_month_end,
+    resolve_month_summary,
     write_decree_with_agno,
 )
 from ming_sim.issues import bind_content as _bind_issues
@@ -960,7 +961,7 @@ class GameSession:
     def resolve_turn(self, decree: str = "", on_event=None) -> str:
         """颁诏并即时推演。要求无 pending 残留、≥1 条 draft。
 
-        日制改造后，颁诏不推进日期；第 30 日退朝才跑月终结算。
+        日制改造后，颁诏不推进日期；日终退朝统一跑每日结算与推演。
         """
         if self.pending_count() > 0:
             raise ValueError(f"尚有 {self.pending_count()} 道大臣拟旨待陛下核定（准/驳），不能颁诏。")
@@ -1068,36 +1069,42 @@ class GameSession:
         return result
 
     def advance_without_decree(self) -> None:
-        """兼容旧 CLI：普通退朝至明日；第 30 日跑月终。"""
+        """兼容旧 CLI：普通退朝至明日；每日跑日终结算。"""
         self.end_day()
 
     def end_day(self, on_event=None) -> str:
-        """退朝至明日；第 30 日退朝时跑月终流式结算。"""
+        """退朝至明日；每日结算推演，第 30 日只额外生成月末总结。"""
         if self.pending_count() > 0:
             raise ValueError(f"尚有 {self.pending_count()} 道大臣拟旨待陛下核定（准/驳），不能退朝。")
         draft_count = len(self.db.list_directives(self.state, statuses=("draft",)))
         if draft_count:
             raise ValueError(f"尚有 {draft_count} 道诏书草案未颁布或删除，不能退朝。")
         self.auto_save("endday")
+        self.process_arrived_dispatches(on_event=on_event)
+        report = resolve_day_end(
+            self.state,
+            self.db,
+            self.agno_db,
+            self.llm_config,
+            deaths_this_turn=self.deaths_this_turn,
+            debuts_this_turn=self.debuts_this_turn,
+            on_event=on_event,
+            content=self.content,
+            registry=self.registry,
+        )
         if int(self.state.day) >= 30:
-            self.process_arrived_dispatches(on_event=on_event)
-            report = resolve_month_end(
+            report = resolve_month_summary(
                 self.state,
                 self.db,
                 self.agno_db,
                 self.llm_config,
-                deaths_this_turn=self.deaths_this_turn,
-                debuts_this_turn=self.debuts_this_turn,
+                daily_report=report,
                 on_event=on_event,
-                content=self.content,
-                registry=self.registry,
             )
-            self.last_report = report
-        else:
-            self.state.next_day()
-            self.db.save_state(self.state)
-            self.process_arrived_dispatches(on_event=on_event)
-            report = ""
+        self.last_report = report
+        self.state.next_day()
+        self.db.save_state(self.state)
+        self.process_arrived_dispatches(on_event=on_event)
         self.state.turn_phase = TurnPhase.SUMMONING.value
         self.db.save_state(self.state)
         return report

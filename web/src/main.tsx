@@ -255,6 +255,7 @@ type GameState = {
   today_events: CourtEvent[];
   court_events: CourtEvent[];
   month_end_due: boolean;
+  month_summary_due?: boolean;
   last_decree: string;
   last_report: string;
   dispatches?: Dispatch[];
@@ -1110,7 +1111,7 @@ function App() {
 
   const endDay = async () => {
     if (busy) return;
-    setBusy(state.month_end_due ? "月终退朝" : "退朝至明日");
+    setBusy(state.month_end_due ? "月末总结" : "日终退朝");
     setSettleStage("");
     setSettleThinking("");
     setSettleNarrative("");
@@ -1177,7 +1178,7 @@ function App() {
     }
   };
 
-  const settling = busy === "月终退朝" || busy === "颁诏即时回奏";
+  const settling = busy === "日终退朝" || busy === "月末总结" || busy === "颁诏即时回奏";
   const guardClose = (fn: () => void) => () => {
     if (settling) return;
     fn();
@@ -1342,8 +1343,8 @@ function App() {
 
       {settling ? (
         <SettlementLock
-          title={busy === "颁诏即时回奏" ? "即时回奏中" : "月终退朝中"}
-          narrativeLabel={busy === "颁诏即时回奏" ? "即时奏疏" : "月末奏章"}
+          title={busy === "颁诏即时回奏" ? "即时回奏中" : busy === "月末总结" ? "月末总结中" : "日终退朝中"}
+          narrativeLabel={busy === "颁诏即时回奏" ? "即时奏疏" : busy === "月末总结" ? "月末总结" : "日终奏报"}
           stage={settleStage}
           thinking={settleThinking}
           narrative={settleNarrative}
@@ -1993,15 +1994,15 @@ function BudgetMovementsList({ movements, total }: { movements: BudgetMovement[]
   if (!movements.length) {
     return (
       <span className="budget-list">
-        <span className="budget-list-title">本月一次性入账（上月末结算）</span>
-        <span className="budget-row"><span><b>暂无</b><small>上月末未结算入出</small></span></span>
+        <span className="budget-list-title">上日一次性入账（日终结算）</span>
+        <span className="budget-row"><span><b>暂无</b><small>上日未结算入出</small></span></span>
       </span>
     );
   }
   return (
     <span className="budget-list">
       <span className="budget-list-title">
-        本月一次性入账（上月末结算）
+        上日一次性入账（日终结算）
         <small className={total >= 0 ? "income" : "expense"}>　合计 {formatSignedMoney(total)}</small>
       </span>
       {movements.map((m, idx) => {
@@ -2086,9 +2087,9 @@ function BottomCommandBar({
         <img src="/icon_scroll.png" alt="" className="command-art" />
         <span className="command-caption"><b>史册</b><small>历代奏报/诏书</small></span>
       </button>
-      <button className="command-icon" onClick={onEndDay} aria-label={monthEndDue ? "月终退朝" : "退朝至明日"}>
+      <button className="command-icon" onClick={onEndDay} aria-label={monthEndDue ? "日终退朝并生成月末总结" : "日终退朝"}>
         <img src="/icon_seal.png" alt="" className="command-art" />
-        <span className="command-caption"><b>{monthEndDue ? "月终退朝" : "退朝"}</b><small>{monthEndDue ? "月终结算" : "至明日"}</small></span>
+        <span className="command-caption"><b>{monthEndDue ? "月末总结" : "退朝"}</b><small>{monthEndDue ? "日结+总结" : "日终结算"}</small></span>
       </button>
     </nav>
   );
@@ -2300,7 +2301,7 @@ function SecretOrderDetailDialog({
             ))}
           </dl>
           <SecretOrderDetailBlock title="密令正文" text={order.content || "未记正文。"} />
-          {order.sim_note ? <SecretOrderDetailBlock title="月度动向" text={order.sim_note} tone="green" /> : null}
+          {order.sim_note ? <SecretOrderDetailBlock title="日常动向" text={order.sim_note} tone="green" /> : null}
           {order.result ? (
             <SecretOrderDetailBlock title={order.status === "active" ? "承办回报" : "执行结果"} text={order.result} tone="green" />
           ) : null}
@@ -2333,7 +2334,7 @@ function ClosedIssuesModal({ items, onClose }: { items: ClosedIssue[]; onClose: 
   const failed = items.filter((i) => i.status === "failed");
   const dropped = items.filter((i) => i.status === "dropped");
   return (
-    <FullscreenModal title="局势了结" subtitle={`本月共 ${items.length} 条局势了结`} bgClass="modal-bg-state" onClose={onClose}>
+    <FullscreenModal title="局势了结" subtitle={`本日共 ${items.length} 条局势了结`} bgClass="modal-bg-state" onClose={onClose}>
       <article className="state-document modal-scroll">
         {resolved.length ? <ClosedGroup title="已结案" items={resolved} cls="resolved" /> : null}
         {failed.length ? <ClosedGroup title="已崩坏" items={failed} cls="failed" /> : null}
@@ -2398,6 +2399,7 @@ type HistoryTurnItem = {
   turn: number;
   year: number;
   period: number;
+  day?: number;
   has_report: boolean;
   has_extraction: boolean;
   has_directive: boolean;
@@ -2425,6 +2427,7 @@ type HistoryDetail = {
   exists: boolean;
   year: number;
   period: number;
+  day?: number;
   report: string;
   decree_text: string;
   directives: HistoryDirective[];
@@ -2480,7 +2483,7 @@ function HistoryModal({ onClose }: { onClose: () => void }) {
     return () => { alive = false; };
   }, [selectedTurn]);
 
-  const subtitle = turns.length ? `共 ${turns.length} 月存档` : "尚无存档";
+  const subtitle = turns.length ? `共 ${turns.length} 日存档` : "尚无存档";
 
   return (
     <FullscreenModal title="史册：历代奏报与诏书" subtitle={subtitle} bgClass="modal-bg-state" onClose={onClose}>
@@ -2504,8 +2507,8 @@ function HistoryModal({ onClose }: { onClose: () => void }) {
                     className={`history-turn-item ${active ? "active" : ""}`}
                     onClick={() => setSelectedTurn(t.turn)}
                   >
-                    <b>{t.year} 年 {t.period} 月</b>
-                    <small>第 {t.turn} 回合 · {tags.join(" / ") || "—"}</small>
+                    <b>{t.year} 年 {t.period} 月{t.day ? `${t.day} 日` : ""}</b>
+                    <small>第 {t.turn} 日 · {tags.join(" / ") || "—"}</small>
                   </button>
                 </li>
               );
@@ -3036,7 +3039,7 @@ function HistoryDetailView({
   detail: HistoryDetail | null;
   selectedTurn: number | null;
 }) {
-  if (selectedTurn == null) return <div className="document-section"><p className="long-copy">请从左侧择月。</p></div>;
+  if (selectedTurn == null) return <div className="document-section"><p className="long-copy">请从左侧择日。</p></div>;
   if (loading) return <div className="document-section"><p className="long-copy">加载中…</p></div>;
   if (error) return <div className="document-section"><p className="long-copy">加载失败：{error}</p></div>;
   if (!detail || !detail.exists) return <div className="document-section"><p className="long-copy">该回合无存档。</p></div>;
@@ -3045,7 +3048,7 @@ function HistoryDetailView({
     <>
       {detail.decree_text ? (
         <section className="document-section">
-          <h3 className="extraction-section-title">本月诏书</h3>
+          <h3 className="extraction-section-title">本日诏书</h3>
           <pre className="memorial-text">{detail.decree_text}</pre>
         </section>
       ) : null}
@@ -3073,7 +3076,7 @@ function HistoryDetailView({
 
       {detail.report ? (
         <section className="document-section">
-          <h3 className="extraction-section-title">月末邸报奏报</h3>
+          <h3 className="extraction-section-title">日终奏报</h3>
           <pre className="memorial-text">{detail.report}</pre>
         </section>
       ) : null}
@@ -3496,7 +3499,7 @@ function SituationPanel({ issues, closedIssues }: { issues: Issue[]; closedIssue
               <div className="situation-tip-row"><span>阶段</span><b>{issue.phase}</b></div>
               <div className="situation-tip-row"><span>进度</span><b>{issue.bar_value} / 100</b></div>
               <div className="situation-tip-row">
-                <span>月度推进</span>
+                <span>自然推进</span>
                 <b>{issue.inertia > 0 ? `+${issue.inertia}` : issue.inertia}/月</b>
               </div>
               <div className="situation-tip-row">
@@ -3688,7 +3691,7 @@ function ChatModal({
                 <div className="secret-order-title">{o.title}</div>
                 <div className="secret-order-meta">{o.year_issued} 年 {o.period_issued} 月下令 · {o.status === "in_transit" ? "在途未达" : "已送达"}</div>
                 {o.content && <div className="secret-order-content">{o.content}</div>}
-                {o.sim_note && <div className="secret-order-content"><b>月度动向：</b>{o.sim_note}</div>}
+                {o.sim_note && <div className="secret-order-content"><b>日常动向：</b>{o.sim_note}</div>}
                 {o.result && <div className="secret-order-content"><b>承办回报：</b>{o.result}</div>}
               </div>
             ))}

@@ -24,7 +24,7 @@ from ming_sim.content import GameContent
 from ming_sim.communications import communication_days
 from ming_sim.locations import COURT_LOCATION, infer_character_location
 from ming_sim.matching import match_army_id_from_text, match_region_id_from_text
-from ming_sim.models import Event, GameState, monthly_amount, period_label
+from ming_sim.models import Event, GameState, monthly_amount, period_label, date_label
 from ming_sim.token_stats import tlog
 
 
@@ -3691,7 +3691,7 @@ class GameDB:
 
     def list_archived_turns(self) -> List[Dict[str, object]]:
         """所有已存档回合（turn_reports/turn_extractions/turn_directives 任一有数据）。
-        返回按 turn 升序的元信息列表，每项含 turn/year/period 与各来源是否存在。"""
+        返回按 turn 升序的元信息列表，每项含 turn/year/period/day 与各来源是否存在。"""
         rows = self.conn.execute(
             """
             SELECT t.turn AS turn,
@@ -3713,17 +3713,22 @@ class GameDB:
             ORDER BY t.turn
             """
         ).fetchall()
-        return [
-            {
+        result: List[Dict[str, object]] = []
+        for r in rows:
+            cal = self.conn.execute(
+                "SELECT day FROM turn_calendar WHERE turn = ?",
+                (int(r["turn"]),),
+            ).fetchone()
+            result.append({
                 "turn": int(r["turn"]),
                 "year": int(r["year"]),
                 "period": int(r["period"]),
+                "day": int(cal["day"]) if cal else 0,
                 "has_report": bool(r["has_report"]),
                 "has_extraction": bool(r["has_extraction"]),
                 "has_directive": bool(r["has_directive"]),
-            }
-            for r in rows
-        ]
+            })
+        return result
 
     def list_directives_by_turn(self, turn: int) -> List[Dict[str, object]]:
         """读某回合已颁诏（issued）草案，按 id 升序。"""
@@ -4632,16 +4637,19 @@ class GameDB:
         self.conn.commit()
         tlog(f"[secret_order] close id={order_id} status={status}")
 
-    def submit_secret_order_for_review(self, order_id: int, claim: str, year: int, period: int) -> bool:
+    def submit_secret_order_for_review(
+        self, order_id: int, claim: str, year: int, period: int, day: int = 0
+    ) -> bool:
         """大臣提交密令待推演核议：active → pending_review。
-        claim 按月戳追加进 result 时间线（与 progress 同列，但带 "[提交核议]" 标记），
+        claim 按日戳追加进 result 时间线（与 progress 同列，但带 "[提交核议]" 标记），
         让推演看时同时知道大臣自述。仅 active 状态可提交。"""
         row = self.conn.execute(
             "SELECT status FROM secret_orders WHERE id = ?", (int(order_id),)
         ).fetchone()
         if not row or row["status"] != "active":
             return False
-        stamp = f"〔{period_label(year, period)}〕[提交核议] "
+        stamp_label = date_label(year, period, day) if day else period_label(year, period)
+        stamp = f"〔{stamp_label}〕[提交核议] "
         note = (claim or "").strip()
         prev = self.conn.execute(
             "SELECT result FROM secret_orders WHERE id = ?", (int(order_id),)
@@ -4660,9 +4668,12 @@ class GameDB:
         tlog(f"[secret_order] submit_for_review id={order_id} claim={note[:60]!r}")
         return True
 
-    def _has_secret_order_period_line(self, order_id: int, column: str, year: int, period: int) -> bool:
-        """本年月该列是否已有一行（用于一回合一步闸门）。"""
-        stamp = f"〔{period_label(year, period)}〕"
+    def _has_secret_order_period_line(
+        self, order_id: int, column: str, year: int, period: int, day: int = 0
+    ) -> bool:
+        """该日/该月该列是否已有一行（用于一回合一步闸门）。"""
+        stamp_label = date_label(year, period, day) if day else period_label(year, period)
+        stamp = f"〔{stamp_label}〕"
         row = self.conn.execute(
             f"SELECT {column} AS v FROM secret_orders WHERE id = ?", (int(order_id),)
         ).fetchone()
@@ -4672,13 +4683,15 @@ class GameDB:
 
     def _append_secret_order_line(
         self, order_id: int, column: str, note: str, year: int, period: int,
+        day: int = 0,
         reject_if_same_period: bool = False,
     ) -> bool:
-        """把一条带年月戳的进展/副作用追加进密令的 result/sim_note，存成历史时间线。
-        reject_if_same_period=True 时，本年月已有行则拒写（返回 False，用于一回合一步）；
-        否则同年月再写替换当月行。不同年月一律新增。返回是否实际写入。"""
+        """把一条带日期戳的进展/副作用追加进密令的 result/sim_note，存成历史时间线。
+        reject_if_same_period=True 时，本日已有行则拒写（返回 False，用于一回合一步）；
+        否则同日再写替换当日行。不同日期一律新增。返回是否实际写入。"""
         assert column in ("result", "sim_note")
-        stamp = f"〔{period_label(year, period)}〕"
+        stamp_label = date_label(year, period, day) if day else period_label(year, period)
+        stamp = f"〔{stamp_label}〕"
         row = self.conn.execute(
             f"SELECT {column} AS v FROM secret_orders WHERE id = ? AND status = 'active'",
             (int(order_id),),
@@ -4687,14 +4700,14 @@ class GameDB:
             return False  # 已结案或不存在，不追加
         lines = [ln for ln in str(row["v"] or "").split("\n") if ln.strip()]
         if reject_if_same_period and any(ln.startswith(stamp) for ln in lines):
-            return False  # 本回合已推过一步，拒
-        lines = [ln for ln in lines if not ln.startswith(stamp)]  # 去掉当月旧行
+            return False  # 本日已推过一步，拒
+        lines = [ln for ln in lines if not ln.startswith(stamp)]  # 去掉当日旧行
         lines.append(f"{stamp}{note.strip()}")
-        # 按〔年月〕戳排序，保证时间线顺序（同月替换后不致错位）
+        # 按〔年月日〕戳排序，保证时间线顺序（同日替换后不致错位）
         def _stamp_key(ln: str):
             import re as _re
-            m = _re.match(r"〔(\d+)年(\d+)月〕", ln)
-            return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+            m = _re.match(r"〔(\d+)年(\d+)月(?:(\d+)日)?〕", ln)
+            return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)) if m else (0, 0, 0)
         lines.sort(key=_stamp_key)
         self.conn.execute(
             f"UPDATE secret_orders SET {column} = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -4704,22 +4717,22 @@ class GameDB:
         return True
 
     def update_secret_order_progress(
-        self, order_id: int, progress_note: str, year: int = 0, period: int = 0
+        self, order_id: int, progress_note: str, year: int = 0, period: int = 0, day: int = 0
     ) -> bool:
-        """承办人推进一步：按年月追加进 result 历史时间线，不改 status。
-        一回合只能推一步——本回合已有进展行则拒（返回 False），不覆盖、不叠加。"""
+        """承办人推进一步：按日期追加进 result 历史时间线，不改 status。
+        一日只能推一步——本日已有进展行则拒（返回 False），不覆盖、不叠加。"""
         ok = self._append_secret_order_line(
-            order_id, "result", progress_note, year, period, reject_if_same_period=True
+            order_id, "result", progress_note, year, period, day=day, reject_if_same_period=True
         )
         tlog(f"[secret_order] progress id={order_id} ok={ok} note={progress_note[:40]!r}")
         return ok
 
     def update_secret_order_sim_note(
-        self, order_id: int, sim_note: str, year: int = 0, period: int = 0
+        self, order_id: int, sim_note: str, year: int = 0, period: int = 0, day: int = 0
     ) -> None:
-        """推演写密令副作用（泄漏/反弹等），按年月追加进 sim_note 历史时间线，
-        不动 result/status。同月再写替换（推演每月一次）。与承办人进展分列。"""
-        self._append_secret_order_line(order_id, "sim_note", sim_note, year, period)
+        """推演写密令副作用（泄漏/反弹等），按日期追加进 sim_note 历史时间线，
+        不动 result/status。同日再写替换。与承办人进展分列。"""
+        self._append_secret_order_line(order_id, "sim_note", sim_note, year, period, day=day)
         tlog(f"[secret_order] sim_note id={order_id} note={sim_note[:40]!r}")
 
     def rush_secret_order(
@@ -4729,7 +4742,7 @@ class GameDB:
         deadline_months: int = 1,
         reason: str = "",
     ) -> Dict[str, object]:
-        """缩短 active 密令期限。deadline_months<=0 表示本月立即送核议。"""
+        """缩短 active 密令期限。deadline_months<=0 表示本日立即送核议。"""
         row = self.conn.execute(
             "SELECT id, title, status, result, due_turn FROM secret_orders WHERE id = ?",
             (int(order_id),),
@@ -4744,12 +4757,12 @@ class GameDB:
             months = 1
         target_turn = int(state.turn) + months * 30
         old_due = int(row["due_turn"] or 0)
-        stamp = f"〔{period_label(state.year, state.period)}〕"
+        stamp = f"〔{date_label(state.year, state.period, state.day)}〕"
         why = (reason or "").strip()[:120] or "奉旨加急"
         prev = row["result"] or ""
         lines = [ln for ln in prev.split("\n") if ln.strip()]
         if months <= 0:
-            lines.append(f"{stamp}[奉旨即核] {why}；本月即移交密旨核议。")
+            lines.append(f"{stamp}[奉旨即核] {why}；本日即移交密旨核议。")
             self.conn.execute(
                 """
                 UPDATE secret_orders
@@ -4819,7 +4832,7 @@ class GameDB:
         return True
 
     def auto_submit_due_secret_orders(self, state: GameState) -> List[Dict[str, object]]:
-        """把到期 active 密令自动转入 pending_review，保证当月推演必须给终判。"""
+        """把到期 active 密令自动转入 pending_review，保证日终推演必须给终判。"""
         rows = self.conn.execute(
             """
             SELECT id, title, result FROM secret_orders
@@ -4830,8 +4843,8 @@ class GameDB:
         ).fetchall()
         submitted: List[Dict[str, object]] = []
         for row in rows:
-            stamp = f"〔{period_label(state.year, state.period)}〕[期限届满] "
-            note = "御限已至，移交月末密旨核议；据既有查办、风声与盘面定成败。"
+            stamp = f"〔{date_label(state.year, state.period, state.day)}〕[期限届满] "
+            note = "御限已至，移交日终密旨核议；据既有查办、风声与盘面定成败。"
             prev = row["result"] or ""
             lines = [ln for ln in prev.split("\n") if ln.strip()]
             if not any("[期限届满]" in ln for ln in lines):
