@@ -967,6 +967,7 @@ select:focus-visible {
 .minister-status.status-dismissed,
 .minister-status.status-exiled { background: rgba(150, 70, 30, 0.9); }
 .minister-status.status-retired { background: rgba(90, 90, 100, 0.85); }
+.minister-status.status-remote { background: rgba(44, 88, 112, 0.9); }
 /* 状态徽标在前时，紧随的 office 不再独占右端 */
 .minister-status + .minister-office { margin-left: 6px; }
 

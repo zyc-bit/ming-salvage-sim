@@ -191,6 +191,7 @@ class GameState:
     period: int = 10
     day: int = 1
     turn: int = 1
+    court_location: str = "beizhili"
     turn_phase: str = "summoning"  # summoning | reviewing | issued —— 见 session.TurnPhase
     metrics: Dict[str, int] = field(
         default_factory=lambda: {

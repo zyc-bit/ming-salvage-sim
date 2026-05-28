@@ -377,6 +377,12 @@ class WebGame:
 
     def refresh_turn(self) -> None:
         self.session.begin_turn()
+        self.reload_chat_history()
+
+    def reload_chat_history(self) -> None:
+        self.chat_history = {name: [] for name in self.session.content.characters}
+        for name, msgs in self.db.load_all_chat_history().items():
+            self.chat_history.setdefault(name, []).extend(msgs)
 
     # ── 自定义立绘 ────────────────────────────────────────────────────────
     def find_character(self, name: str) -> Optional[Character]:
@@ -397,9 +403,12 @@ class WebGame:
         # summary 不含官职（卡片/详情已单独显 office），避免重复
         summary = f"{character.faction}一系，行事{character.style}。"
         power_row = self.db.conn.execute(
-            "SELECT power_id FROM characters WHERE name=?", (character.name,)
+            "SELECT power_id, location FROM characters WHERE name=?", (character.name,)
         ).fetchone()
         power_id = (power_row["power_id"] if power_row else None) or getattr(character, "power_id", "ming") or "ming"
+        location_id = (power_row["location"] if power_row else None) or getattr(character, "location", "") or self.state.court_location
+        same_location = location_id == self.state.court_location
+        communication = self.db.communication_profile(self.state.court_location, location_id)
         return {
             "name": character.name,
             "office": office,
@@ -412,6 +421,10 @@ class WebGame:
             "summary": summary,
             "portrait_id": character.portrait_id,
             "power_id": power_id,
+            "location_id": location_id,
+            "location_label": self.db.region_label(location_id),
+            "same_location": same_location,
+            "communication_days": communication,
             "skills": [
                 {
                     "id": skill_id,
@@ -429,6 +442,15 @@ class WebGame:
             "SELECT power_id FROM characters WHERE name=?", (character.name,)
         ).fetchone()
         return (row["power_id"] if row else None) or getattr(character, "power_id", "ming") or "ming"
+
+    def character_at_court(self, character: Character) -> bool:
+        if self.character_power_id(character) != "ming":
+            return False
+        status, _reason = self.db.get_character_status(character.name)
+        if status != "active":
+            return False
+        location = self.db.character_location(character.name) or getattr(character, "location", "") or self.state.court_location
+        return location == self.state.court_location
 
     def directive_payload(self, row) -> Dict[str, Any]:
         return {
@@ -668,7 +690,9 @@ class WebGame:
         )
         return {
             "turn": {"year": self.state.year, "period": self.state.period,
-                     "day": self.state.day, "turn": self.state.turn, "phase": self.state.turn_phase},
+                     "day": self.state.day, "turn": self.state.turn, "phase": self.state.turn_phase,
+                     "court_location": self.state.court_location,
+                     "court_location_label": self.db.region_label(self.state.court_location)},
             "metrics": self.state.metrics,
             "previous_summary": self.previous_summary,
             "treasury": self.db.treasury_report(self.state),
@@ -687,7 +711,7 @@ class WebGame:
             "ministers": [
                 self.public_character(c)
                 for c in self.content.characters.values()
-                if c.office_type != "后宫" and self.character_power_id(c) == "ming"
+                if c.office_type != "后宫" and self.character_at_court(c)
             ],
             "consorts": [
                 self.public_character(c)
@@ -701,6 +725,7 @@ class WebGame:
             "month_end_due": int(self.state.day) >= 30,
             "last_decree": self.last_decree,
             "last_report": self.last_report,
+            "dispatches": self.db.list_dispatches(statuses=("in_transit", "delivered"), limit=80),
         }
 
     # ── 聊天 ──────────────────────────────────────────────────────────────
@@ -744,8 +769,26 @@ class WebGame:
         if not text:
             raise HTTPException(status_code=400, detail="问话不能为空。")
         self.chat_history.setdefault(minister_name, []).append({"role": "user", "content": text})
+        message_id = 0
         if minister_name not in self.session.temporary_characters:
-            self.db.append_chat_message(minister_name, self.state.turn, "user", text)
+            message_id = self.db.append_chat_message(minister_name, self.state.turn, "user", text)
+        character = self.session._character(minister_name)
+        location = self.db.character_location(minister_name) or character.location or self.state.court_location
+        if location != self.state.court_location:
+            letter = self.session.dispatch_letter(minister_name, text, chat_message_id=message_id)
+            notice = (
+                f"书信已发往{letter['destination_label']}，预计"
+                f"{letter['arrival_date']['year']}年{letter['arrival_date']['period']}月{letter['arrival_date']['day']}日送达；"
+                f"最早{letter['earliest_reply_date']['year']}年{letter['earliest_reply_date']['period']}月{letter['earliest_reply_date']['day']}日收到回信。"
+            )
+            return {
+                "minister": minister_name,
+                "answer": notice,
+                "history": self.chat_history[minister_name],
+                "suggestions": self.suggestions_for(character),
+                "directives": [self.directive_payload(row) for row in self.directive_rows()],
+                "letter_sent": letter,
+            }
         result = self.session.chat(minister_name, text)
         proposed = None
         if result.proposed_directive is not None:
@@ -769,9 +812,34 @@ class WebGame:
             yield {"type": "error", "message": "问话不能为空。"}
             return
         self.chat_history.setdefault(minister_name, []).append({"role": "user", "content": text})
+        message_id = 0
         if minister_name not in self.session.temporary_characters:
-            self.db.append_chat_message(minister_name, self.state.turn, "user", text)
+            message_id = self.db.append_chat_message(minister_name, self.state.turn, "user", text)
         character = self.session._character(minister_name)
+        location = self.db.character_location(minister_name) or character.location or self.state.court_location
+        if location != self.state.court_location:
+            try:
+                letter = self.session.dispatch_letter(minister_name, text, chat_message_id=message_id)
+            except Exception as error:  # noqa: BLE001
+                yield {"type": "error", "message": str(error)}
+                return
+            notice = (
+                f"书信已发往{letter['destination_label']}，预计"
+                f"{letter['arrival_date']['year']}年{letter['arrival_date']['period']}月{letter['arrival_date']['day']}日送达；"
+                f"最早{letter['earliest_reply_date']['year']}年{letter['earliest_reply_date']['period']}月{letter['earliest_reply_date']['day']}日收到回信。"
+            )
+            payload = {
+                "minister": minister_name,
+                "answer": notice,
+                "history": self.chat_history[minister_name],
+                "suggestions": self.suggestions_for(character),
+                "directives": [self.directive_payload(row) for row in self.directive_rows()],
+                "letter_sent": letter,
+                "state": self.state_payload(),
+            }
+            yield {"type": "letter_sent", "payload": letter}
+            yield {"type": "done", "payload": payload}
+            return
         chunks: List[str] = []
         try:
             agent = self.session.registry.get(character)
@@ -1306,10 +1374,13 @@ def _require_active_minister(minister_name: str) -> None:
 async def api_chat_history(minister_name: str) -> Dict[str, Any]:
     _require_active_minister(minister_name)
     character = get_game().session._character(minister_name)
+    same_location = (get_game().db.character_location(minister_name) or character.location or get_game().state.court_location) == get_game().state.court_location
     return {
         "minister": get_game().public_character(character),
         "history": get_game().chat_history.get(minister_name, []),
         "suggestions": get_game().suggestions_for(character),
+        "mode": "summon" if same_location else "letter",
+        "communication": get_game().session.communication_estimate(character),
     }
 
 
@@ -1332,17 +1403,27 @@ async def api_create_secret_order(minister_name: str, request: SecretOrderReques
     order_id = game.db.create_secret_order(
         game.session.state, minister_name, title, content, request.tags, deadline_months=request.deadline_months
     )
-    immediate = game.session.resolve_immediate(
-        source_kind="secret_order",
-        source_id=str(order_id),
-        minister_name=minister_name,
-        title=f"密令：{title}",
-        trigger_text=content,
-        response_text=f"密令交付{minister_name}",
-        tool_result=json.dumps({"order_id": order_id, "tags": request.tags, "deadline_months": request.deadline_months}, ensure_ascii=False),
-    )
+    order = game.db.get_secret_order(order_id) or {}
+    immediate: Dict[str, Any] = {}
+    if order.get("status") == "active":
+        immediate = game.session.resolve_immediate(
+            source_kind="secret_order",
+            source_id=str(order_id),
+            minister_name=minister_name,
+            title=f"密令：{title}",
+            trigger_text=content,
+            response_text=f"密令交付{minister_name}",
+            tool_result=json.dumps({"order_id": order_id, "tags": request.tags, "deadline_months": request.deadline_months}, ensure_ascii=False),
+        )
     print(f"[secret_order/api] 直接落库 minister={minister_name} title={title!r} id={order_id}")
-    return {"order_id": order_id, "minister_name": minister_name, "title": title, "status": "active", "court_event": immediate.get("court_event")}
+    return {
+        "order_id": order_id,
+        "minister_name": minister_name,
+        "title": title,
+        "status": order.get("status") or "active",
+        "destination_location": order.get("destination_location") or "",
+        "court_event": immediate.get("court_event"),
+    }
 
 
 @app.post("/api/ministers/{minister_name}/chat")
@@ -1359,6 +1440,8 @@ async def api_chat_stream(minister_name: str, request: ChatRequest) -> Streaming
             item_type = str(item.get("type", "message"))
             if item_type == "delta":
                 yield sse_event("delta", {"content": item.get("content", "")})
+            elif item_type == "letter_sent":
+                yield sse_event("letter_sent", item.get("payload", {}))
             elif item_type in {"immediate_stage", "immediate_thinking", "immediate_text", "immediate_done", "immediate_error"}:
                 yield sse_event(item_type, {"content": item.get("content", "")})
             elif item_type == "done":

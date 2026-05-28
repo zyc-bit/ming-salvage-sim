@@ -14,6 +14,7 @@ from ming_sim.constants import TURN_UNIT
 from ming_sim.content import GameContent
 from ming_sim.context import victory_status
 from ming_sim.db import GameDB, infer_office_type_from_office, normalize_office
+from ming_sim.locations import infer_character_location
 from ming_sim.flows import (
     ISSUE_METRIC_KEYS,
     ISSUE_METRIC_LOCK_CAPS,
@@ -961,6 +962,7 @@ def apply_score_extraction(
             # ── 在册任命/调任：改回 active 并授官 ──
             new_type = str(item.get("new_office_type") or "").strip()
             old_office = content.characters[name].office
+            inferred_location, location_defaulted, location_reason = infer_character_location(new_office, new_type or content.characters[name].office_type, "active")
             try:
                 if cur_status != "active":
                     db.set_character_status(state, name, "active", reason[:200] or "诏书任命")
@@ -983,6 +985,8 @@ def apply_score_extraction(
             applied_office_changes.append({
                 "name": name, "old_status": cur_status, "old_office": old_office, "new_office": new_office,
                 "kind": "transfer", "reason": reason,
+                "location": inferred_location,
+                **({"location_defaulted": True, "location_reason": location_reason} if location_defaulted else {}),
                 **({"displaced": displaced_parts} if displaced_parts else {}),
             })
             continue
@@ -996,9 +1000,12 @@ def apply_score_extraction(
         }
         appointed, displaced = apply_appointment(db, state, content, registry, appt)
         if appointed:
+            inferred_location, location_defaulted, location_reason = infer_character_location(new_office, str(item.get("new_office_type") or ""), "active")
             applied_office_changes.append({
                 "name": appointed, "new_office": new_office,
                 "kind": "appoint", "displaced": displaced, "reason": reason,
+                "location": inferred_location,
+                **({"location_defaulted": True, "location_reason": location_reason} if location_defaulted else {}),
             })
         else:
             applied_office_changes.append({

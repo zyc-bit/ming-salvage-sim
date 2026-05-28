@@ -49,3 +49,5 @@ web/tsconfig.tsbuildinfo
 
 # Portrait local backups (rembg 抠图前的 RGB 原图，git 历史里有，无需入库)
 web/public/portraits/_backup_rgb/
+
+AGENTS.md

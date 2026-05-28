@@ -124,6 +124,10 @@ type Minister = {
   favorite: boolean;
   portrait_id?: string;  // 空/undefined=无专属，前端 fallback 到池
   power_id?: string;     // 大明=ming, 后金=houjin, 流寇=bandits 等
+  location_id?: string;
+  location_label?: string;
+  same_location?: boolean;
+  communication_days?: { letter_days: number; decree_days: number; secret_days: number };
   skills: Array<{ id: string; name: string; sources: string[]; description: string }>;
 };
 
@@ -228,7 +232,7 @@ type CourtEvent = {
 };
 
 type GameState = {
-  turn: { year: number; period: number; day: number; turn: number; phase?: string };
+  turn: { year: number; period: number; day: number; turn: number; phase?: string; court_location?: string; court_location_label?: string };
   metrics: Metrics;
   previous_summary: string;
   treasury: string;
@@ -253,6 +257,7 @@ type GameState = {
   month_end_due: boolean;
   last_decree: string;
   last_report: string;
+  dispatches?: Dispatch[];
 };
 
 type ChatMessage = { role: "user" | "minister"; content: string };
@@ -291,10 +296,40 @@ type SecretOrder = {
   content: string;
   tags: string[];
   importance: number;
-  status: "active" | "pending_review" | "done" | "failed" | "cancelled";
+  status: "in_transit" | "active" | "pending_review" | "done" | "failed" | "cancelled";
+  origin_location?: string;
+  destination_location?: string;
+  delivered_turn?: number;
   result: string;
   sim_note: string;
   turn_closed: number | null;
+};
+
+type Dispatch = {
+  id: number;
+  kind: "letter" | "letter_reply" | "decree" | "secret_order";
+  direction: "outbound" | "inbound";
+  status: string;
+  sender_name: string;
+  recipient_name: string;
+  origin_location: string;
+  destination_location: string;
+  sent_turn: number;
+  arrival_turn: number;
+  payload?: Record<string, any>;
+};
+
+type LetterSent = {
+  dispatch_id: number;
+  recipient_name: string;
+  destination_location: string;
+  destination_label: string;
+  outbound_days: number;
+  return_days: number;
+  arrival_turn: number;
+  earliest_reply_turn: number;
+  arrival_date: { year: number; period: number; day: number };
+  earliest_reply_date: { year: number; period: number; day: number };
 };
 
 type ProposedDirective = { id: number; text: string; status: string; notes: string };
@@ -310,6 +345,7 @@ type ChatResponse = {
   secret_order_id?: number;
   court_event?: CourtEvent | null;
   state?: GameState;
+  letter_sent?: LetterSent;
 };
 
 type ApiErrorDetail = {
@@ -410,6 +446,8 @@ const streamChat = async (
       const payload = JSON.parse(parsed.data);
       if (parsed.event === "delta") {
         onDelta(String(payload.content || ""));
+      } else if (parsed.event === "letter_sent") {
+        onImmediate?.(parsed.event, JSON.stringify(payload));
       } else if (parsed.event.startsWith("immediate_")) {
         onImmediate?.(parsed.event, String(payload.content || ""));
       } else if (parsed.event === "done") {
@@ -671,7 +709,7 @@ function App() {
     api<{ orders: SecretOrder[] }>("/api/secret_orders")
       .then(({ orders }) => {
         setSecretOrders(orders);
-        if (orders.some(o => o.status === "active" || o.status === "pending_review")) {
+        if (orders.some(o => o.status === "in_transit" || o.status === "active" || o.status === "pending_review")) {
           // 延迟 400ms，避免与邸报弹窗争抢
           setTimeout(() => setActiveModal("secret_orders"), 400);
         }
@@ -820,7 +858,15 @@ function App() {
       const data = await streamChat(activeMinister.name, message, (delta) => {
         setStreamingMinisterMessage((current) => current + delta);
       }, (event, content) => {
-        if (event === "immediate_stage") {
+        if (event === "letter_sent") {
+          try {
+            const letter = JSON.parse(content) as LetterSent;
+            setChatNotice(`书信已发往${letter.destination_label}，预计 ${letter.arrival_date.year} 年 ${letter.arrival_date.period} 月 ${letter.arrival_date.day} 日送达，最早 ${letter.earliest_reply_date.year} 年 ${letter.earliest_reply_date.period} 月 ${letter.earliest_reply_date.day} 日回奏抵京。`);
+          } catch {
+            setChatNotice("书信已发出。");
+          }
+          setBusy("驿传发信");
+        } else if (event === "immediate_stage") {
           setImmediateStage(content);
           setBusy("即时回奏中");
         } else if (event === "immediate_text") {
@@ -841,7 +887,10 @@ function App() {
         .then(({ orders }) => setSecretOrders(orders))
         .catch(() => {});
       if (data.secret_order_id) {
-        setChatNotice(`密令已秘密交付${activeMinister.name}，编号 #${data.secret_order_id}。`);
+        setChatNotice(`密令已秘密发往${activeMinister.name}，编号 #${data.secret_order_id}。`);
+      }
+      if (data.letter_sent) {
+        setChatNotice(`书信已发往${data.letter_sent.destination_label}，预计 ${data.letter_sent.arrival_date.year} 年 ${data.letter_sent.arrival_date.period} 月 ${data.letter_sent.arrival_date.day} 日送达，最早 ${data.letter_sent.earliest_reply_date.year} 年 ${data.letter_sent.earliest_reply_date.period} 月 ${data.letter_sent.earliest_reply_date.day} 日回奏抵京。`);
       }
       if (data.court_event?.status === "applied") {
         setChatNotice((prev) => prev || "即时回奏已落入盘面。");
@@ -1096,13 +1145,13 @@ function App() {
           if (!evName || !dataRaw) continue;
           let data: { content?: string; message?: string; state?: GameState; report?: string } = {};
           try { data = JSON.parse(dataRaw); } catch { continue; }
-          if (evName === "stage") {
+          if (evName === "stage" || evName === "dispatch_stage" || evName === "immediate_stage") {
             setSettleStage(data.content || "");
-          } else if (evName === "thinking") {
+          } else if (evName === "thinking" || evName === "immediate_thinking") {
             setSettleThinking((prev) => prev + (data.content || ""));
-          } else if (evName === "text") {
+          } else if (evName === "text" || evName === "immediate_text") {
             setSettleNarrative((prev) => prev + (data.content || ""));
-          } else if (evName === "error") {
+          } else if (evName === "error" || evName === "immediate_error") {
             failed = data.message || "退朝失败。";
             done = true;
           } else if (evName === "done") {
@@ -1150,7 +1199,7 @@ function App() {
       <BottomCommandBar
         eventsCount={state.events.length}
         directivesCount={state.directives.length}
-        secretOrdersCount={secretOrders.filter((o) => o.status === "active" || o.status === "pending_review").length}
+        secretOrdersCount={secretOrders.filter((o) => o.status === "in_transit" || o.status === "active" || o.status === "pending_review").length}
         onOpenMemorials={() => setActiveModal("state")}
         onOpenEdict={() => setActiveModal("edict")}
         onOpenExtraction={() => setActiveModal("extraction")}
@@ -1200,7 +1249,7 @@ function App() {
       ) : null}
 
       {activeModal === "chat" && activeMinister ? (
-        <FullscreenModal title={`召对：${activeMinister.name}`} subtitle={activeMinister.office} bgClass="modal-bg-chat" onClose={guardClose(() => setActiveModal("none"))}>
+        <FullscreenModal title={`${activeMinister.same_location === false ? "致信" : "召对"}：${activeMinister.name}`} subtitle={activeMinister.office} bgClass="modal-bg-chat" onClose={guardClose(() => setActiveModal("none"))}>
           <ChatModal
             minister={activeMinister}
             portraitPrefix={(state.consorts || []).some((c) => c.name === activeMinister.name) ? "consort_" : "minister_"}
@@ -1215,7 +1264,7 @@ function App() {
             input={input}
             busy={busy}
             error={error}
-            secretOrders={secretOrders.filter((o) => o.minister_name === activeMinister.name && (o.status === "active" || o.status === "pending_review"))}
+            secretOrders={secretOrders.filter((o) => o.minister_name === activeMinister.name && (o.status === "in_transit" || o.status === "active" || o.status === "pending_review"))}
             onInput={setInput}
             onSend={sendChat}
             onHint={setComposerHint}
@@ -1285,6 +1334,7 @@ function App() {
       {activeModal === "secret_orders" ? (
         <SecretOrdersModal
           orders={secretOrders}
+          courtLocation={state.turn.court_location || "beizhili"}
           onClose={() => setActiveModal("none")}
           onOpenMinister={(name) => {
             setActiveModal("chat");
@@ -1630,9 +1680,10 @@ function MinisterCardList({
                 <div className="minister-card-top">
                   <span className="minister-name">{minister.name}</span>
                   {ousted && <span className={`minister-status status-${minister.status}`}>{minister.status_label}</span>}
+                  {minister.same_location === false && <span className="minister-status status-remote">致信</span>}
                   {minister.office && <span className="minister-office">{minister.office}</span>}
                 </div>
-                <span className="minister-bio">{minister.summary}</span>
+                <span className="minister-bio">{minister.location_label ? `${minister.location_label} · ${minister.summary}` : minister.summary}</span>
               </div>
               {minister.favorite && <Star className="favorite-mark" size={13} />}
             </button>
@@ -1683,9 +1734,10 @@ function MinisterCardList({
               <div className="minister-card-top">
                 <span className="minister-name">{minister.name}</span>
                 {ousted && <span className={`minister-status status-${minister.status}`}>{minister.status_label}</span>}
+                {minister.same_location === false && <span className="minister-status status-remote">致信</span>}
                 {minister.office && <span className="minister-office">{minister.office}</span>}
               </div>
-              <span className="minister-bio">{minister.summary}</span>
+              <span className="minister-bio">{minister.location_label ? `${minister.location_label} · ${minister.summary}` : minister.summary}</span>
             </div>
             {minister.favorite && <Star className="favorite-mark" size={13} />}
           </button>
@@ -2106,16 +2158,19 @@ function ReportModal({ report, onClose }: { report: string; onClose: () => void 
 
 function SecretOrdersModal({
   orders,
+  courtLocation,
   onClose,
   onOpenMinister,
 }: {
   orders: SecretOrder[];
+  courtLocation: string;
   onClose: () => void;
   onOpenMinister: (name: string) => void;
 }) {
-  const [tab, setTab] = React.useState<"active" | "pending_review" | "done" | "failed" | "all">("active");
+  const [tab, setTab] = React.useState<"in_transit" | "active" | "pending_review" | "done" | "failed" | "all">("active");
   const [selectedOrder, setSelectedOrder] = React.useState<SecretOrder | null>(null);
   const statusLabel: Record<string, string> = {
+    in_transit: "在途",
     active: "进行中",
     pending_review: "待核议",
     done: "已完成",
@@ -2123,6 +2178,7 @@ function SecretOrdersModal({
     cancelled: "已撤销",
   };
   const statusCls: Record<string, string> = {
+    in_transit: "so-pending",
     active: "so-active",
     pending_review: "so-pending",
     done: "so-done",
@@ -2130,6 +2186,7 @@ function SecretOrdersModal({
     cancelled: "so-cancelled",
   };
   const tabs: { key: typeof tab; label: string }[] = [
+    { key: "in_transit",    label: `在途 (${orders.filter(o => o.status === "in_transit").length})` },
     { key: "active",         label: `进行中 (${orders.filter(o => o.status === "active").length})` },
     { key: "pending_review", label: `待核议 (${orders.filter(o => o.status === "pending_review").length})` },
     { key: "done",           label: `已完成 (${orders.filter(o => o.status === "done").length})` },
@@ -2162,7 +2219,7 @@ function SecretOrdersModal({
               </div>
               <div className="so-meta">{o.year_issued} 年 {o.period_issued} 月下令 · 承办：{o.minister_name}</div>
               <div className="so-open-hint">点击查看密令详情</div>
-              {o.status === "active" && (
+              {o.status === "active" && (!o.destination_location || o.destination_location === courtLocation) && (
                 <button
                   className="secondary-action so-goto"
                   onClick={(event) => {
@@ -2182,6 +2239,7 @@ function SecretOrdersModal({
       {selectedOrder ? (
         <SecretOrderDetailDialog
           order={selectedOrder}
+          courtLocation={courtLocation}
           statusLabel={statusLabel}
           statusCls={statusCls}
           onClose={() => setSelectedOrder(null)}
@@ -2198,12 +2256,14 @@ function SecretOrdersModal({
 
 function SecretOrderDetailDialog({
   order,
+  courtLocation,
   statusLabel,
   statusCls,
   onClose,
   onOpenMinister,
 }: {
   order: SecretOrder;
+  courtLocation: string;
   statusLabel: Record<string, string>;
   statusCls: Record<string, string>;
   onClose: () => void;
@@ -2211,7 +2271,7 @@ function SecretOrderDetailDialog({
 }) {
   const deadlineText = order.due_turn
     ? `第 ${order.due_turn} 日序核议${order.due_turn <= order.turn_issued ? "" : `（限 ${order.due_turn - order.turn_issued} 日）`}`
-    : "无硬期限";
+    : (order.status === "in_transit" ? "送达后起算" : "无硬期限");
   const detailRows = [
     ["编号", `#${order.id}`],
     ["承办", order.minister_name],
@@ -2249,7 +2309,7 @@ function SecretOrderDetailDialog({
           ) : null}
         </div>
         <footer className="so-detail-actions">
-          {order.status === "active" ? (
+          {order.status === "active" && (!order.destination_location || order.destination_location === courtLocation) ? (
             <button className="secondary-action" onClick={() => onOpenMinister(order.minister_name)}>
               <MessageSquare size={15} />
               召见 {order.minister_name}
@@ -3555,6 +3615,7 @@ function ChatModal({
   const chatLogRef = React.useRef<HTMLDivElement | null>(null);
   const inputRef = React.useRef<HTMLTextAreaElement | null>(null);
   const displayMessages: ChatDisplayMessage[] = [...chat];
+  const isRemote = minister.same_location === false;
 
   if (pendingUserMessage) {
     displayMessages.push({ role: "user", content: pendingUserMessage, pending: true });
@@ -3606,6 +3667,9 @@ function ChatModal({
               )}
               {minister.office && <span className="profile-office">{minister.office}</span>}
             </p>
+            {minister.location_label && (
+              <p><span className="profile-office">{minister.location_label}</span></p>
+            )}
           </div>
           <button className="icon-button" aria-label="收藏大臣" onClick={onFavorite}>
             <Star size={16} fill={minister.favorite ? "currentColor" : "none"} />
@@ -3625,7 +3689,7 @@ function ChatModal({
             {secretOrders.map((o) => (
               <div key={o.id} className="secret-order-item">
                 <div className="secret-order-title">{o.title}</div>
-                <div className="secret-order-meta">{o.year_issued} 年 {o.period_issued} 月下令</div>
+                <div className="secret-order-meta">{o.year_issued} 年 {o.period_issued} 月下令 · {o.status === "in_transit" ? "在途未达" : "已送达"}</div>
                 {o.content && <div className="secret-order-content">{o.content}</div>}
                 {o.sim_note && <div className="secret-order-content"><b>月度动向：</b>{o.sim_note}</div>}
                 {o.result && <div className="secret-order-content"><b>承办回报：</b>{o.result}</div>}
@@ -3646,7 +3710,7 @@ function ChatModal({
           {busy && !streamingMinisterMessage && (
             <div className="chat-message minister thinking">
               <span>{minister.name}</span>
-              <p><Loader2 size={14} />大臣思索中...</p>
+              <p><Loader2 size={14} />{isRemote ? "驿传发信中..." : "大臣思索中..."}</p>
             </div>
           )}
           {(immediateStage || immediateNarrative) && (
@@ -3673,7 +3737,7 @@ function ChatModal({
             ))}
           </div>
           <label className="chat-input">
-            <span>问话</span>
+            <span>{isRemote ? "书信" : "问话"}</span>
             <textarea
               ref={inputRef}
               value={input}
@@ -3682,17 +3746,17 @@ function ChatModal({
                 if (composerHint) onHint("");
               }}
               onKeyDown={handleKeyDown}
-              placeholder="问大臣军情、钱粮、地方，或要求他拟旨... Enter 发送，Shift+Enter 换行"
+              placeholder={isRemote ? "写给异地臣工的书信... Enter 发送，Shift+Enter 换行" : "问大臣军情、钱粮、地方，或要求他拟旨... Enter 发送，Shift+Enter 换行"}
             />
           </label>
           <div className="composer-actions">
             <button className={`primary-action ${!input.trim() ? "is-empty" : ""}`} onClick={handleSend} disabled={!!busy}>
               <Send size={15} />
-              发送
+              {isRemote ? "发信" : "发送"}
             </button>
             <button className="secondary-action composer-exit" onClick={onClose}>
               <X size={15} />
-              退出召对
+              {isRemote ? "退出书信" : "退出召对"}
             </button>
             {composerHint && <div className="composer-hint">{composerHint}</div>}
           </div>

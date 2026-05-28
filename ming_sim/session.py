@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Tuple
 
 from ming_sim.agents import bind_content as _bind_agents, create_memory_retrieval_agent
 from ming_sim.agents import parse_agent_json, run_agent_text
+from ming_sim.communications import communication_days, date_after_days
 from ming_sim.content import GameContent
 from ming_sim.context import (
     bind_content as _bind_context,
@@ -22,6 +23,7 @@ from ming_sim.context import (
     victory_status,
 )
 from ming_sim.db import GameDB, infer_office_type_from_office, normalize_office
+from ming_sim.locations import infer_character_location
 from ming_sim.decree import (
     resolve_immediate_event,
     resolve_month_end,
@@ -29,7 +31,7 @@ from ming_sim.decree import (
 )
 from ming_sim.issues import bind_content as _bind_issues
 from ming_sim.llm_model import create_agno_db, extract_agent_text, verify_llm_available
-from ming_sim.models import Character, CourtContext, GameState, LLMConfig
+from ming_sim.models import Character, CourtContext, GameState, LLMConfig, date_label
 from ming_sim.paths import user_data_path
 from ming_sim.registry import MinisterRegistry, bind_content as _bind_registry
 from ming_sim.skills import bind_content as _bind_skills
@@ -272,6 +274,7 @@ def apply_appointment(
         style="新入宫闱" if is_consort else "新任未详",
         power_id="ming",
         status="active",
+        location=infer_character_location(office, office_type, "active")[0],
     )
     content.characters[name] = character
     db.add_character(state, character)
@@ -438,13 +441,14 @@ class GameSession:
     # ── 召见阶段 ──────────────────────────────────────────────────────────
 
     def list_ministers(self) -> List[MinisterView]:
-        # 状态以 DB 为准（历史卒/登场/罢黜均落 DB）；offstage 未登场者不进名单。
+        # 朝堂名单只列御前可召见者：在朝、属大明、且人与皇帝同处一地。
         views: List[MinisterView] = []
         for c in self.content.characters.values():
             if getattr(c, "power_id", "ming") != "ming":
                 continue
             status, _ = self.db.get_character_status(c.name)
-            if status == "offstage":
+            location = self.db.character_location(c.name) or getattr(c, "location", "") or self.state.court_location
+            if status != "active" or location != self.state.court_location:
                 continue
             views.append(MinisterView(
                 name=c.name, office=c.office, office_type=c.office_type,
@@ -506,6 +510,7 @@ class GameSession:
             courage=50,
             style="身份未详，奉旨临时入殿",
             status="active",
+            location=self.state.court_location,
             summary="此人未入正式朝臣名册，只是奉旨临时入殿奏对；不得自称已有正式官职。",
         )
         self.temporary_characters[clean_name] = character
@@ -535,6 +540,12 @@ class GameSession:
             return (True, "")
         status, reason = self.db.get_character_status(character.name)
         if status == "active":
+            location = self.db.character_location(character.name) or getattr(character, "location", "") or self.state.court_location
+            if location and location != self.state.court_location:
+                return (
+                    False,
+                    f"{character.name}人在{self.db.region_label(location)}，不能入殿召见；可改以书信、诏书或密令传达。",
+                )
             return (True, "")
         label = {
             "offstage": "尚未登场",
@@ -689,6 +700,7 @@ class GameSession:
             courage=55,
             style=style,
             status="active",
+            location=infer_character_location(office, office_type, "active")[0],
             summary=str(data.get("summary") or "").strip(),
         )
         self.content.characters[name] = character
@@ -795,6 +807,169 @@ class GameSession:
         self.last_decree = decree
         return decree
 
+    def communication_estimate(self, character: Character) -> Dict[str, object]:
+        location = self.db.character_location(character.name) or character.location or self.state.court_location
+        outbound = communication_days(self.state.court_location, location, "letter")
+        inbound = communication_days(location, self.state.court_location, "letter_reply")
+        arrive = date_after_days(self.state.year, self.state.period, self.state.day, outbound)
+        reply = date_after_days(self.state.year, self.state.period, self.state.day, outbound + inbound)
+        return {
+            "origin_location": self.state.court_location,
+            "destination_location": location,
+            "outbound_days": outbound,
+            "return_days": inbound,
+            "round_trip_days": outbound + inbound,
+            "arrival_date": {"year": arrive[0], "period": arrive[1], "day": arrive[2]},
+            "earliest_reply_date": {"year": reply[0], "period": reply[1], "day": reply[2]},
+        }
+
+    def dispatch_letter(self, minister_name: str, message: str, chat_message_id: int = 0) -> Dict[str, object]:
+        character = self._character(minister_name)
+        destination = self.db.character_location(minister_name) or character.location or self.state.court_location
+        if destination == self.state.court_location:
+            raise ValueError(f"{minister_name}就在京师，可直接召见。")
+        outbound = communication_days(self.state.court_location, destination, "letter")
+        inbound = communication_days(destination, self.state.court_location, "letter_reply")
+        dispatch_id = self.db.create_dispatch(
+            self.state,
+            kind="letter",
+            direction="outbound",
+            source_kind="chat_message" if chat_message_id else "letter",
+            source_id=str(chat_message_id or f"{minister_name}:{self.state.turn}"),
+            sender_name="皇帝",
+            recipient_name=minister_name,
+            origin_location=self.state.court_location,
+            destination_location=destination,
+            payload={"message": message, "chat_message_id": chat_message_id},
+        )
+        arrive = date_after_days(self.state.year, self.state.period, self.state.day, outbound)
+        reply = date_after_days(self.state.year, self.state.period, self.state.day, outbound + inbound)
+        return {
+            "dispatch_id": dispatch_id,
+            "recipient_name": minister_name,
+            "destination_location": destination,
+            "destination_label": self.db.region_label(destination),
+            "outbound_days": outbound,
+            "return_days": inbound,
+            "arrival_turn": int(self.state.turn) + outbound,
+            "earliest_reply_turn": int(self.state.turn) + outbound + inbound,
+            "arrival_date": {"year": arrive[0], "period": arrive[1], "day": arrive[2]},
+            "earliest_reply_date": {"year": reply[0], "period": reply[1], "day": reply[2]},
+        }
+
+    def process_arrived_dispatches(self, on_event=None) -> List[Dict[str, object]]:
+        """Deliver all dispatches due by current state.turn."""
+        if self.registry is None:
+            self.refresh_court_context()
+
+        def _emit(kind: str, data: str) -> None:
+            if on_event:
+                on_event(kind, data)
+
+        processed: List[Dict[str, object]] = []
+        for dispatch in self.db.list_arrived_dispatches(self.state):
+            kind = str(dispatch.get("kind") or "")
+            dispatch_id = int(dispatch["id"])
+            try:
+                self.db.mark_dispatch_delivered(dispatch_id)
+                if kind == "letter":
+                    processed.append(self._deliver_letter(dispatch))
+                elif kind == "letter_reply":
+                    processed.append(self._deliver_letter_reply(dispatch, on_event=on_event))
+                elif kind == "decree":
+                    _emit("dispatch_stage", f"诏书送达{self.db.region_label(str(dispatch.get('destination_location') or ''))}")
+                    processed.append(self._deliver_decree(dispatch, on_event=on_event))
+                elif kind == "secret_order":
+                    processed.append(self._deliver_secret_order(dispatch))
+                else:
+                    self.db.complete_dispatch(dispatch_id, self.state, status="failed", error=f"未知通信类型：{kind}")
+            except Exception as exc:  # noqa: BLE001
+                self.db.complete_dispatch(dispatch_id, self.state, status="failed", error=str(exc))
+                processed.append({"id": dispatch_id, "kind": kind, "status": "failed", "error": str(exc)})
+        if processed:
+            self.refresh_court_context()
+        return processed
+
+    def _deliver_letter(self, dispatch: Dict[str, object]) -> Dict[str, object]:
+        minister_name = str(dispatch.get("recipient_name") or "")
+        character = self._character(minister_name)
+        payload = dispatch.get("payload") if isinstance(dispatch.get("payload"), dict) else {}
+        message = str((payload or {}).get("message") or "")
+        agent = self.registry.get(character) if self.registry is not None else None
+        prompt = (
+            "你收到皇帝远道来信。请只写一封简短回信，按当日可立即回奏的范围回答；"
+            "不要声称调查、执行或地方局势已经即时完成。\n\n"
+            f"皇帝来信：{message}"
+        )
+        reply_text = extract_agent_text(agent.run(prompt)).strip() if agent is not None else ""
+        if not reply_text:
+            reply_text = f"臣{minister_name}谨奉来札，已知圣意。事涉查办执行者，臣当俟实情再奏。"
+        origin = str(dispatch.get("destination_location") or "")
+        reply_id = self.db.create_dispatch(
+            self.state,
+            kind="letter_reply",
+            direction="inbound",
+            source_kind="letter",
+            source_id=str(dispatch["id"]),
+            parent_dispatch_id=int(dispatch["id"]),
+            sender_name=minister_name,
+            recipient_name="皇帝",
+            origin_location=origin,
+            destination_location=self.state.court_location,
+            payload={"message": message, "reply_text": reply_text},
+        )
+        self.db.complete_dispatch(int(dispatch["id"]), self.state, status="completed", reply_text=reply_text)
+        return {"id": int(dispatch["id"]), "kind": "letter", "status": "completed", "reply_dispatch_id": reply_id}
+
+    def _deliver_letter_reply(self, dispatch: Dict[str, object], on_event=None) -> Dict[str, object]:
+        payload = dispatch.get("payload") if isinstance(dispatch.get("payload"), dict) else {}
+        minister_name = str(dispatch.get("sender_name") or "")
+        message = str((payload or {}).get("message") or "")
+        reply_text = str((payload or {}).get("reply_text") or dispatch.get("reply_text") or "")
+        if reply_text:
+            self.db.append_chat_message(minister_name, self.state.turn, "minister", reply_text)
+        result = self.resolve_immediate(
+            source_kind="letter_reply",
+            source_id=str(dispatch["id"]),
+            minister_name=minister_name,
+            title=f"{date_label(self.state.year, self.state.period, self.state.day)}{minister_name}回信抵京",
+            trigger_text=message,
+            response_text=reply_text,
+            tool_result="",
+            on_event=on_event,
+        )
+        court_event = result.get("court_event") if isinstance(result, dict) else None
+        event_id = int(court_event.get("id") or 0) if isinstance(court_event, dict) else 0
+        self.db.complete_dispatch(int(dispatch["id"]), self.state, status="completed", reply_text=reply_text, court_event_id=event_id)
+        return {"id": int(dispatch["id"]), "kind": "letter_reply", "status": "completed", "court_event_id": event_id}
+
+    def _deliver_decree(self, dispatch: Dict[str, object], on_event=None) -> Dict[str, object]:
+        payload = dispatch.get("payload") if isinstance(dispatch.get("payload"), dict) else {}
+        decree_text = str((payload or {}).get("decree_text") or "")
+        directives_brief = str((payload or {}).get("directives_brief") or "")
+        destination = str(dispatch.get("destination_location") or "")
+        result = self.resolve_immediate(
+            source_kind="decree_dispatch",
+            source_id=str(dispatch["id"]),
+            minister_name="",
+            title=f"诏书送达{self.db.region_label(destination)}",
+            trigger_text=decree_text,
+            response_text=directives_brief,
+            tool_result="",
+            on_event=on_event,
+        )
+        court_event = result.get("court_event") if isinstance(result, dict) else None
+        event_id = int(court_event.get("id") or 0) if isinstance(court_event, dict) else 0
+        self.db.complete_dispatch(int(dispatch["id"]), self.state, status="completed", court_event_id=event_id)
+        return {"id": int(dispatch["id"]), "kind": "decree", "status": "completed", "court_event_id": event_id}
+
+    def _deliver_secret_order(self, dispatch: Dict[str, object]) -> Dict[str, object]:
+        payload = dispatch.get("payload") if isinstance(dispatch.get("payload"), dict) else {}
+        order_id = int((payload or {}).get("order_id") or dispatch.get("source_id") or 0)
+        ok = self.db.activate_secret_order_on_delivery(self.state, order_id)
+        self.db.complete_dispatch(int(dispatch["id"]), self.state, status="completed" if ok else "failed", error="" if ok else "密令不存在或状态并非在途")
+        return {"id": int(dispatch["id"]), "kind": "secret_order", "status": "completed" if ok else "failed", "order_id": order_id}
+
     def resolve_turn(self, decree: str = "", on_event=None) -> str:
         """颁诏并即时推演。要求无 pending 残留、≥1 条 draft。
 
@@ -815,22 +990,59 @@ class GameSession:
             for row in directives
         ]
         self.db.mark_directives_issued(self.state)
-        result = resolve_immediate_event(
-            self.state,
-            self.db,
-            self.agno_db,
-            self.llm_config,
-            source_kind="decree",
-            source_id=",".join(directive_ids),
-            minister_name="",
-            title="颁布诏书",
-            trigger_text=decree_text,
-            response_text="\n".join(directives_brief),
-            tool_result="",
-            on_event=on_event,
-            content=self.content, registry=self.registry,
-        )
-        report = str(result.get("narrative") or "")
+        destinations: List[str] = []
+        for row in directives:
+            for location in self.db.infer_locations_from_text(str(row["text"] or "")):
+                if location not in destinations:
+                    destinations.append(location)
+        if not destinations:
+            destinations = [self.state.court_location]
+        remote_destinations = [loc for loc in destinations if loc != self.state.court_location]
+
+        dispatch_lines: List[str] = []
+        for location in remote_destinations:
+            dispatch_id = self.db.create_dispatch(
+                self.state,
+                kind="decree",
+                direction="outbound",
+                source_kind="decree",
+                source_id=",".join(directive_ids),
+                sender_name="皇帝",
+                recipient_name=self.db.region_label(location),
+                origin_location=self.state.court_location,
+                destination_location=location,
+                payload={
+                    "decree_text": decree_text,
+                    "directives_brief": "\n".join(directives_brief),
+                    "directive_ids": directive_ids,
+                },
+            )
+            days = communication_days(self.state.court_location, location, "decree")
+            arrive = date_after_days(self.state.year, self.state.period, self.state.day, days)
+            dispatch_lines.append(
+                f"诏书已发往{self.db.region_label(location)}，预计{arrive[0]}年{arrive[1]}月{arrive[2]}日送达生效（在途 #{dispatch_id}）。"
+            )
+
+        report = ""
+        if self.state.court_location in destinations or not remote_destinations:
+            result = resolve_immediate_event(
+                self.state,
+                self.db,
+                self.agno_db,
+                self.llm_config,
+                source_kind="decree",
+                source_id="local:" + ",".join(directive_ids) if remote_destinations else ",".join(directive_ids),
+                minister_name="",
+                title="颁布诏书",
+                trigger_text=decree_text,
+                response_text="\n".join(directives_brief),
+                tool_result="",
+                on_event=on_event,
+                content=self.content, registry=self.registry,
+            )
+            report = str(result.get("narrative") or "")
+        if dispatch_lines:
+            report = "\n\n".join([part for part in [report, "\n".join(dispatch_lines)] if part])
         self.last_report = report
         self.last_decree = decree_text
         self.state.turn_phase = TurnPhase.SUMMONING.value
@@ -881,6 +1093,7 @@ class GameSession:
             raise ValueError(f"尚有 {draft_count} 道诏书草案未颁布或删除，不能退朝。")
         self.auto_save("endday")
         if int(self.state.day) >= 30:
+            self.process_arrived_dispatches(on_event=on_event)
             report = resolve_month_end(
                 self.state,
                 self.db,
@@ -896,6 +1109,7 @@ class GameSession:
         else:
             self.state.next_day()
             self.db.save_state(self.state)
+            self.process_arrived_dispatches(on_event=on_event)
             report = ""
         self.state.turn_phase = TurnPhase.SUMMONING.value
         self.db.save_state(self.state)

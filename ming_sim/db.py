@@ -21,6 +21,8 @@ from ming_sim.constants import (
     FISCAL_SCORE_FIELDS, REGION_FIELD_ALIASES, REGION_SCORE_FIELDS, REGION_TEXT_FIELDS, TURN_UNIT,
 )
 from ming_sim.content import GameContent
+from ming_sim.communications import communication_days
+from ming_sim.locations import COURT_LOCATION, infer_character_location
 from ming_sim.matching import match_army_id_from_text, match_region_id_from_text
 from ming_sim.models import Event, GameState, monthly_amount, period_label
 from ming_sim.token_stats import tlog
@@ -102,6 +104,7 @@ class GameDB:
                 period INTEGER NOT NULL,
                 day INTEGER NOT NULL DEFAULT 1,
                 turn INTEGER NOT NULL,
+                court_location TEXT NOT NULL DEFAULT 'beizhili',
                 turn_phase TEXT NOT NULL DEFAULT 'summoning'
             );
 
@@ -453,6 +456,33 @@ class GameDB:
             CREATE INDEX IF NOT EXISTS idx_court_events_date
                 ON court_events(year, period, day, id);
 
+            CREATE TABLE IF NOT EXISTS dispatches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'in_transit',
+                source_kind TEXT NOT NULL DEFAULT '',
+                source_id TEXT NOT NULL DEFAULT '',
+                parent_dispatch_id INTEGER NOT NULL DEFAULT 0,
+                sender_name TEXT NOT NULL DEFAULT '',
+                recipient_name TEXT NOT NULL DEFAULT '',
+                origin_location TEXT NOT NULL DEFAULT '',
+                destination_location TEXT NOT NULL DEFAULT '',
+                sent_turn INTEGER NOT NULL,
+                arrival_turn INTEGER NOT NULL,
+                completed_turn INTEGER NOT NULL DEFAULT 0,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                reply_text TEXT NOT NULL DEFAULT '',
+                court_event_id INTEGER NOT NULL DEFAULT 0,
+                error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_dispatches_arrival
+                ON dispatches(status, arrival_turn, id);
+            CREATE INDEX IF NOT EXISTS idx_dispatches_source
+                ON dispatches(source_kind, source_id);
+
             CREATE TABLE IF NOT EXISTS secret_orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 turn_issued INTEGER NOT NULL,
@@ -464,7 +494,11 @@ class GameDB:
                 content TEXT NOT NULL DEFAULT '',
                 tags TEXT NOT NULL DEFAULT '[]',
                 importance INTEGER NOT NULL DEFAULT 4,
+                deadline_months INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'active',
+                origin_location TEXT NOT NULL DEFAULT '',
+                destination_location TEXT NOT NULL DEFAULT '',
+                delivered_turn INTEGER NOT NULL DEFAULT 0,
                 result TEXT NOT NULL DEFAULT '',
                 sim_note TEXT NOT NULL DEFAULT '',
                 turn_closed INTEGER,
@@ -687,11 +721,16 @@ class GameDB:
         # 步骤7：回合阶段（旧库迁移，schema 升级非 fallback）
         self.ensure_column("game_state", "turn_phase", "TEXT NOT NULL DEFAULT 'summoning'")
         self.ensure_column("game_state", "day", "INTEGER NOT NULL DEFAULT 1")
+        self.ensure_column("game_state", "court_location", "TEXT NOT NULL DEFAULT 'beizhili'")
         self.ensure_column("court_events", "day", "INTEGER NOT NULL DEFAULT 1")
         # 密令推演副作用列（result 留给承办人进展，sim_note 给推演写泄漏/反弹，互不覆盖）
         self.ensure_column("secret_orders", "sim_note", "TEXT NOT NULL DEFAULT ''")
         # 密令期限：0=无硬期限；到 due_turn 时自动转入待核议，由推演当月判 done/failed。
         self.ensure_column("secret_orders", "due_turn", "INTEGER NOT NULL DEFAULT 0")
+        self.ensure_column("secret_orders", "deadline_months", "INTEGER NOT NULL DEFAULT 0")
+        self.ensure_column("secret_orders", "origin_location", "TEXT NOT NULL DEFAULT ''")
+        self.ensure_column("secret_orders", "destination_location", "TEXT NOT NULL DEFAULT ''")
+        self.ensure_column("secret_orders", "delivered_turn", "INTEGER NOT NULL DEFAULT 0")
         # economy_ledger 支出结构化标签：仅 extractor 抽出的 economy_moves 填这三列；
         # flows 月固定支出与所有收入留 NULL。purpose 受控枚举见 constants.ECONOMY_PURPOSES。
         self.ensure_column("economy_ledger", "purpose", "TEXT")
@@ -1009,6 +1048,7 @@ class GameDB:
                     ),
                 )
         self._migrate_arrears_unit_to_silver(is_fresh_armies_seed)
+        self.backfill_character_locations()
         self.conn.commit()
 
     def _migrate_arrears_unit_to_silver(self, is_fresh_armies_seed: bool) -> None:
@@ -1042,6 +1082,41 @@ class GameDB:
             (ARREARS_UNIT_VERSION,),
         )
 
+    def backfill_character_locations(self) -> List[Dict[str, object]]:
+        """Fill missing character locations with existing region_id values."""
+        valid_regions = {str(r["id"]) for r in self.conn.execute("SELECT id FROM regions").fetchall()}
+        if not valid_regions:
+            return []
+        rows = self.conn.execute(
+            """
+            SELECT name, office, office_type, status, power_id, location
+            FROM characters
+            WHERE COALESCE(location, '') = ''
+            """
+        ).fetchall()
+        applied: List[Dict[str, object]] = []
+        for row in rows:
+            location, defaulted, reason = infer_character_location(
+                str(row["office"] or ""), str(row["office_type"] or ""), str(row["status"] or "")
+            )
+            if location not in valid_regions:
+                location = COURT_LOCATION
+                defaulted = True
+                reason = "推断地点不在地区表，默认回京师"
+            self.conn.execute(
+                "UPDATE characters SET location=? WHERE name=?",
+                (location, row["name"]),
+            )
+            if str(row["name"]) in self.content.characters:
+                self.content.characters[str(row["name"])].location = location
+            applied.append({
+                "name": row["name"],
+                "location": location,
+                "defaulted": defaulted,
+                "reason": reason,
+            })
+        return applied
+
     def has_state(self) -> bool:
         row = self.conn.execute("SELECT 1 FROM game_state WHERE id = 1").fetchone()
         return row is not None
@@ -1049,12 +1124,13 @@ class GameDB:
     def save_state(self, state: GameState) -> None:
         self.conn.execute(
             """
-            INSERT INTO game_state (id, year, period, day, turn, turn_phase)
-            VALUES (1, ?, ?, ?, ?, ?)
+            INSERT INTO game_state (id, year, period, day, turn, court_location, turn_phase)
+            VALUES (1, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET year = excluded.year, period = excluded.period,
-                day = excluded.day, turn = excluded.turn, turn_phase = excluded.turn_phase
+                day = excluded.day, turn = excluded.turn, court_location = excluded.court_location,
+                turn_phase = excluded.turn_phase
             """,
-            (state.year, state.period, state.day, state.turn, state.turn_phase),
+            (state.year, state.period, state.day, state.turn, state.court_location, state.turn_phase),
         )
         self.conn.execute(
             """
@@ -1080,7 +1156,7 @@ class GameDB:
         self.conn.commit()
 
     def load_state(self, start_ym: str = "") -> GameState:
-        row = self.conn.execute("SELECT year, period, day, turn, turn_phase FROM game_state WHERE id = 1").fetchone()
+        row = self.conn.execute("SELECT year, period, day, turn, court_location, turn_phase FROM game_state WHERE id = 1").fetchone()
         if row is None:
             state = GameState()
             if start_ym:
@@ -1106,6 +1182,7 @@ class GameDB:
         }
         state = GameState(
             year=int(row["year"]), period=int(row["period"]), day=int(row["day"] or 1), turn=int(row["turn"]),
+            court_location=str(row["court_location"] or COURT_LOCATION),
             turn_phase=str(row["turn_phase"] or "summoning"),
         )
         if metrics:
@@ -1240,17 +1317,27 @@ class GameDB:
         # 去职（下狱/革职/流放/致仕/死）即削职：清空 characters.office，
         # 原职仍留在 character_offices 备档可追溯。复职（active/offstage）不动 office。
         ousted = status in {"dismissed", "imprisoned", "exiled", "retired", "dead"}
+        loc_text = reason or ""
+        location, location_defaulted, _loc_reason = infer_character_location(loc_text, "", status) if loc_text else ("", False, "")
         if ousted:
-            self.conn.execute(
-                "UPDATE characters SET status=?, status_reason=?, status_changed_turn=?, office='' WHERE name=?",
-                (status, reason[:200], state.turn, name),
-            )
+            if location and not location_defaulted:
+                self.conn.execute(
+                    "UPDATE characters SET status=?, status_reason=?, status_changed_turn=?, office='', location=? WHERE name=?",
+                    (status, reason[:200], state.turn, location, name),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE characters SET status=?, status_reason=?, status_changed_turn=?, office='' WHERE name=?",
+                    (status, reason[:200], state.turn, name),
+                )
         else:
             self.conn.execute(
                 "UPDATE characters SET status=?, status_reason=?, status_changed_turn=? WHERE name=?",
                 (status, reason[:200], state.turn, name),
             )
         self.conn.commit()
+        if location and not location_defaulted and name in self.content.characters:
+            self.content.characters[name].location = location
 
     def get_character_status(self, name: str) -> Tuple[str, str]:
         row = self.conn.execute(
@@ -1316,15 +1403,16 @@ class GameDB:
         if not current_type:
             raise ValueError(f"{name}不属大明朝廷，不能授予大明官职")
         eff_type = infer_office_type_from_office(office, office_type or current_type)
+        location, _defaulted, _loc_reason = infer_character_location(office, eff_type, "active")
         if office_type or eff_type != current_type:
             self.conn.execute(
-                "UPDATE characters SET office=?, office_type=? WHERE name=?",
-                (office, eff_type, name),
+                "UPDATE characters SET office=?, office_type=?, location=? WHERE name=?",
+                (office, eff_type, location, name),
             )
         else:
             self.conn.execute(
-                "UPDATE characters SET office=? WHERE name=?",
-                (office, name),
+                "UPDATE characters SET office=?, location=? WHERE name=?",
+                (office, location, name),
             )
         self.conn.execute(
             """
@@ -1342,6 +1430,7 @@ class GameDB:
         if name in self.content.characters:
             self.content.characters[name].office = office
             self.content.characters[name].office_type = eff_type
+            self.content.characters[name].location = location
 
     def apply_historical_deaths(self, state: GameState) -> List[Dict[str, str]]:
         """月初 tick：只有仍 active 的人到点自然死。被玩家提前罢/狱/流/杀的不走此分支。
@@ -1505,6 +1594,8 @@ class GameDB:
             return
         character.office = normalize_office(character.office)
         character.office_type = infer_office_type_from_office(character.office, character.office_type)
+        if not getattr(character, "location", ""):
+            character.location = infer_character_location(character.office, character.office_type, character.status)[0]
         # 若没有专属 portrait_id，按 office_type 分配预设池头像
         portrait_id = character.portrait_id
         if not portrait_id:
@@ -4241,6 +4332,175 @@ class GameDB:
         )
         self.conn.commit()
 
+    def region_label(self, region_id: str) -> str:
+        row = self.conn.execute("SELECT name FROM regions WHERE id=?", (region_id,)).fetchone()
+        return str(row["name"]) if row else (region_id or "")
+
+    def character_location(self, name: str) -> str:
+        row = self.conn.execute("SELECT location FROM characters WHERE name=?", (name,)).fetchone()
+        return str(row["location"] or "") if row else ""
+
+    def set_character_location(self, name: str, location: str) -> None:
+        self.conn.execute("UPDATE characters SET location=? WHERE name=?", (location, name))
+        self.conn.commit()
+        if name in self.content.characters:
+            self.content.characters[name].location = location
+
+    def communication_profile(self, origin_location: str, destination_location: str) -> Dict[str, int]:
+        return {
+            "letter_days": communication_days(origin_location, destination_location, "letter"),
+            "decree_days": communication_days(origin_location, destination_location, "decree"),
+            "secret_days": communication_days(origin_location, destination_location, "secret_order"),
+        }
+
+    def infer_locations_from_text(self, text: str) -> List[str]:
+        raw = str(text or "")
+        found: List[str] = []
+        region_rows = self.conn.execute("SELECT id, name FROM regions").fetchall()
+        for row in region_rows:
+            rid = str(row["id"])
+            name = str(row["name"])
+            aliases = [rid, name]
+            aliases.extend(part.strip() for part in name.replace("／", "/").split("/") if part.strip())
+            if any(alias and alias in raw for alias in aliases):
+                found.append(rid)
+        for row in self.conn.execute("SELECT name, location FROM characters WHERE location!=''").fetchall():
+            if str(row["name"]) in raw:
+                loc = str(row["location"] or "")
+                if loc:
+                    found.append(loc)
+        inferred, defaulted, _reason = infer_character_location(raw, "")
+        if inferred and not defaulted:
+            found.append(inferred)
+        ordered: List[str] = []
+        for loc in found:
+            if loc and loc not in ordered:
+                ordered.append(loc)
+        return ordered or [COURT_LOCATION]
+
+    # ----- dispatches（书信/诏书/密令在途通信）-----
+
+    def create_dispatch(
+        self,
+        state: GameState,
+        kind: str,
+        direction: str,
+        source_kind: str,
+        source_id: str,
+        sender_name: str,
+        recipient_name: str,
+        origin_location: str,
+        destination_location: str,
+        payload: Dict[str, object] | None = None,
+        parent_dispatch_id: int = 0,
+    ) -> int:
+        days = communication_days(origin_location, destination_location, kind)
+        cur = self.conn.execute(
+            """
+            INSERT INTO dispatches
+                (kind, direction, status, source_kind, source_id, parent_dispatch_id,
+                 sender_name, recipient_name, origin_location, destination_location,
+                 sent_turn, arrival_turn, payload_json)
+            VALUES (?, ?, 'in_transit', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                kind,
+                direction,
+                source_kind,
+                str(source_id),
+                int(parent_dispatch_id or 0),
+                sender_name,
+                recipient_name,
+                origin_location,
+                destination_location,
+                int(state.turn),
+                int(state.turn) + days,
+                json.dumps(payload or {}, ensure_ascii=False, sort_keys=False),
+            ),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def list_dispatches(
+        self,
+        statuses: Optional[Tuple[str, ...]] = None,
+        limit: int = 80,
+    ) -> List[Dict[str, object]]:
+        params: List[object] = []
+        where = ""
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            where = f"WHERE status IN ({placeholders})"
+            params.extend(statuses)
+        rows = self.conn.execute(
+            f"SELECT * FROM dispatches {where} ORDER BY status='in_transit' DESC, arrival_turn, id LIMIT ?",
+            (*params, max(1, int(limit))),
+        ).fetchall()
+        return [self._dispatch_payload(row) for row in rows]
+
+    def list_arrived_dispatches(self, state: GameState) -> List[Dict[str, object]]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM dispatches
+            WHERE status = 'in_transit' AND arrival_turn <= ?
+            ORDER BY arrival_turn, id
+            """,
+            (int(state.turn),),
+        ).fetchall()
+        return [self._dispatch_payload(row) for row in rows]
+
+    def mark_dispatch_delivered(self, dispatch_id: int) -> None:
+        self.conn.execute(
+            "UPDATE dispatches SET status='delivered', updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='in_transit'",
+            (int(dispatch_id),),
+        )
+        self.conn.commit()
+
+    def complete_dispatch(
+        self,
+        dispatch_id: int,
+        state: GameState,
+        status: str = "completed",
+        reply_text: str = "",
+        court_event_id: int = 0,
+        error: str = "",
+    ) -> None:
+        self.conn.execute(
+            """
+            UPDATE dispatches
+            SET status=?, completed_turn=?, reply_text=?, court_event_id=?, error=?, updated_at=CURRENT_TIMESTAMP
+            WHERE id=?
+            """,
+            (status, int(state.turn), reply_text, int(court_event_id or 0), error[:500], int(dispatch_id)),
+        )
+        self.conn.commit()
+
+    def _dispatch_payload(self, row: sqlite3.Row) -> Dict[str, object]:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except Exception:
+            payload = {}
+        return {
+            "id": int(row["id"]),
+            "kind": row["kind"],
+            "direction": row["direction"],
+            "status": row["status"],
+            "source_kind": row["source_kind"] or "",
+            "source_id": row["source_id"] or "",
+            "parent_dispatch_id": int(row["parent_dispatch_id"] or 0),
+            "sender_name": row["sender_name"] or "",
+            "recipient_name": row["recipient_name"] or "",
+            "origin_location": row["origin_location"] or "",
+            "destination_location": row["destination_location"] or "",
+            "sent_turn": int(row["sent_turn"]),
+            "arrival_turn": int(row["arrival_turn"]),
+            "completed_turn": int(row["completed_turn"] or 0),
+            "payload": payload if isinstance(payload, dict) else {},
+            "reply_text": row["reply_text"] or "",
+            "court_event_id": int(row["court_event_id"] or 0),
+            "error": row["error"] or "",
+        }
+
     # ----- secret_orders（密令系统）-----
 
     def create_secret_order(
@@ -4254,24 +4514,64 @@ class GameDB:
         deadline_months: int = 0,
     ) -> int:
         active_count = self.conn.execute(
-            "SELECT COUNT(*) FROM secret_orders WHERE status='active'"
+            "SELECT COUNT(*) FROM secret_orders WHERE status IN ('in_transit','active','pending_review')"
         ).fetchone()[0]
         if active_count >= 20:
             raise ValueError(f"进行中密令已达上限（20条），请先结案部分密令再下新令。当前：{active_count} 条。")
         tags_json = json.dumps(tags, ensure_ascii=False)
         deadline = max(0, min(int(deadline_months or 0), 36))
-        due_turn = int(state.turn) + deadline * 30 if deadline else 0
+        origin_location = state.court_location or COURT_LOCATION
+        destination_location = self.character_location(minister_name) or COURT_LOCATION
+        travel_days = communication_days(origin_location, destination_location, "secret_order")
+        status = "active" if travel_days == 0 else "in_transit"
+        due_turn = int(state.turn) + deadline * 30 if deadline and status == "active" else 0
         cur = self.conn.execute(
             """
             INSERT INTO secret_orders
-                (turn_issued, due_turn, year_issued, period_issued, minister_name, title, content, tags, importance, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+                (turn_issued, due_turn, year_issued, period_issued, minister_name, title, content, tags,
+                 importance, deadline_months, status, origin_location, destination_location, delivered_turn)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (state.turn, due_turn, state.year, state.period, minister_name, title[:20], content, tags_json, importance),
+            (
+                state.turn,
+                due_turn,
+                state.year,
+                state.period,
+                minister_name,
+                title[:20],
+                content,
+                tags_json,
+                importance,
+                deadline,
+                status,
+                origin_location,
+                destination_location,
+                int(state.turn) if status == "active" else 0,
+            ),
         )
+        order_id = int(cur.lastrowid)
+        if status == "in_transit":
+            self.create_dispatch(
+                state,
+                kind="secret_order",
+                direction="outbound",
+                source_kind="secret_order",
+                source_id=str(order_id),
+                sender_name="皇帝",
+                recipient_name=minister_name,
+                origin_location=origin_location,
+                destination_location=destination_location,
+                payload={
+                    "order_id": order_id,
+                    "title": title[:20],
+                    "content": content,
+                    "tags": tags,
+                    "deadline_months": deadline,
+                },
+            )
         self.conn.commit()
-        tlog(f"[secret_order] create id={cur.lastrowid} minister={minister_name} title={title[:20]}")
-        return cur.lastrowid  # type: ignore[return-value]
+        tlog(f"[secret_order] create id={order_id} minister={minister_name} title={title[:20]} status={status}")
+        return order_id
 
     def list_secret_orders(
         self,
@@ -4302,7 +4602,11 @@ class GameDB:
                 "content": r["content"],
                 "tags": json.loads(r["tags"] or "[]"),
                 "importance": int(r["importance"]),
+                "deadline_months": int(r["deadline_months"] if "deadline_months" in r.keys() else 0),
                 "status": r["status"],
+                "origin_location": (r["origin_location"] if "origin_location" in r.keys() else "") or "",
+                "destination_location": (r["destination_location"] if "destination_location" in r.keys() else "") or "",
+                "delivered_turn": int(r["delivered_turn"] if "delivered_turn" in r.keys() else 0),
                 "result": r["result"] or "",
                 "sim_note": (r["sim_note"] if "sim_note" in r.keys() else "") or "",
                 "turn_closed": r["turn_closed"],
@@ -4486,8 +4790,33 @@ class GameDB:
             "sim_note": (r["sim_note"] if "sim_note" in r.keys() else "") or "",
             "turn_issued": int(r["turn_issued"]),
             "due_turn": int(r["due_turn"] if "due_turn" in r.keys() else 0),
+            "deadline_months": int(r["deadline_months"] if "deadline_months" in r.keys() else 0),
+            "origin_location": (r["origin_location"] if "origin_location" in r.keys() else "") or "",
+            "destination_location": (r["destination_location"] if "destination_location" in r.keys() else "") or "",
+            "delivered_turn": int(r["delivered_turn"] if "delivered_turn" in r.keys() else 0),
             "turn_closed": r["turn_closed"],
         }
+
+    def activate_secret_order_on_delivery(self, state: GameState, order_id: int) -> bool:
+        row = self.conn.execute(
+            "SELECT status, deadline_months FROM secret_orders WHERE id=?",
+            (int(order_id),),
+        ).fetchone()
+        if row is None or row["status"] != "in_transit":
+            return False
+        deadline = max(0, min(int(row["deadline_months"] or 0), 36))
+        due_turn = int(state.turn) + deadline * 30 if deadline else 0
+        self.conn.execute(
+            """
+            UPDATE secret_orders
+            SET status='active', due_turn=?, delivered_turn=?, updated_at=CURRENT_TIMESTAMP
+            WHERE id=? AND status='in_transit'
+            """,
+            (due_turn, int(state.turn), int(order_id)),
+        )
+        self.conn.commit()
+        tlog(f"[secret_order] delivered id={order_id} due_turn={due_turn}")
+        return True
 
     def auto_submit_due_secret_orders(self, state: GameState) -> List[Dict[str, object]]:
         """把到期 active 密令自动转入 pending_review，保证当月推演必须给终判。"""

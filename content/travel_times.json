@@ -1,0 +1,28 @@
+{
+  "regions": {
+    "__default__": { "letter_days": 3, "decree_days": 3, "secret_days": 2 },
+    "beizhili": { "letter_days": 0, "decree_days": 0, "secret_days": 0 },
+    "nanzhili": { "letter_days": 3, "decree_days": 3, "secret_days": 2 },
+    "shandong": { "letter_days": 2, "decree_days": 2, "secret_days": 1 },
+    "shanxi": { "letter_days": 2, "decree_days": 2, "secret_days": 1 },
+    "henan": { "letter_days": 2, "decree_days": 2, "secret_days": 1 },
+    "shaanxi": { "letter_days": 4, "decree_days": 4, "secret_days": 3 },
+    "zhejiang": { "letter_days": 4, "decree_days": 4, "secret_days": 3 },
+    "jiangxi": { "letter_days": 5, "decree_days": 5, "secret_days": 4 },
+    "huguang": { "letter_days": 5, "decree_days": 5, "secret_days": 4 },
+    "sichuan": { "letter_days": 7, "decree_days": 7, "secret_days": 5 },
+    "fujian": { "letter_days": 6, "decree_days": 6, "secret_days": 4 },
+    "guangdong": { "letter_days": 6, "decree_days": 6, "secret_days": 5 },
+    "guangxi": { "letter_days": 7, "decree_days": 7, "secret_days": 5 },
+    "yunnan": { "letter_days": 9, "decree_days": 9, "secret_days": 7 },
+    "guizhou": { "letter_days": 7, "decree_days": 7, "secret_days": 5 },
+    "liaodong": { "letter_days": 4, "decree_days": 4, "secret_days": 3 },
+    "dongjiang_area": { "letter_days": 5, "decree_days": 5, "secret_days": 4 },
+    "jianzhou": { "letter_days": 7, "decree_days": 7, "secret_days": 5 },
+    "shenyang_liaoyang": { "letter_days": 6, "decree_days": 6, "secret_days": 4 },
+    "mongol_chahar": { "letter_days": 5, "decree_days": 5, "secret_days": 4 },
+    "korea": { "letter_days": 7, "decree_days": 7, "secret_days": 5 },
+    "nurgan": { "letter_days": 10, "decree_days": 10, "secret_days": 8 },
+    "taiwan": { "letter_days": 8, "decree_days": 8, "secret_days": 6 }
+  }
+}
