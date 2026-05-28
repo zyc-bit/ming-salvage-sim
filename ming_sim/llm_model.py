@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from typing import Dict, Optional
 
+import httpx
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
 from agno.models.openai import OpenAIChat
@@ -19,6 +21,11 @@ from ming_sim.llm_config import (
 from ming_sim.llm_contract import fail_if_llm_error
 from ming_sim.models import LLMConfig
 from ming_sim.token_stats import install_token_stats_patch
+
+
+def _trust_env_proxy() -> bool:
+    raw = (os.environ.get("OPENAI_TRUST_ENV") or os.environ.get("LLM_TRUST_ENV") or "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 
 def _extract_provider_error(error: Exception) -> tuple[str, str, int | None]:
@@ -100,6 +107,8 @@ def create_chat_model(
         kwargs["extra_body"] = extra_body
     if supports_openai_reasoning_effort(llm_config.model):
         kwargs["reasoning_effort"] = "medium" if enable_thinking else "minimal"
+    if not _trust_env_proxy():
+        kwargs["http_client"] = httpx.Client(trust_env=False)
     return OpenAIChat(**kwargs)
 
 
@@ -127,7 +136,7 @@ def verify_llm_available(llm_config: LLMConfig) -> None:
         name="LLM连通性检查",
         id="llm-smoke-test",
         session_id="llm-smoke-test",
-        model=create_chat_model(llm_config, temperature=0, max_tokens=8),
+        model=create_chat_model(llm_config, temperature=0, max_tokens=256),
         instructions=["只输出 ok。"],
         markdown=False,
     )
