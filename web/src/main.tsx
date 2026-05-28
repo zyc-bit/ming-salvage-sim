@@ -892,9 +892,6 @@ function App() {
       if (data.letter_sent) {
         setChatNotice(`书信已发往${data.letter_sent.destination_label}，预计 ${data.letter_sent.arrival_date.year} 年 ${data.letter_sent.arrival_date.period} 月 ${data.letter_sent.arrival_date.day} 日送达，最早 ${data.letter_sent.earliest_reply_date.year} 年 ${data.letter_sent.earliest_reply_date.period} 月 ${data.letter_sent.earliest_reply_date.day} 日回奏抵京。`);
       }
-      if (data.court_event?.status === "applied") {
-        setChatNotice((prev) => prev || "即时回奏已落入盘面。");
-      }
       if (data.proposed_directive) {
         setChatNotice(`${activeMinister.name}已拟旨一道，待陛下在「诏书草案」核定（准/驳）。`);
       }

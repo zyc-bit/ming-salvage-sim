@@ -39,7 +39,7 @@ from ming_sim.skills import available_skill_ids, skill_display_name, skill_sourc
 from ming_sim.context import match_minister_from_text
 from ming_sim.flows import calc_province_fiscal
 from ming_sim.exceptions import LLMContractError  # noqa: F401  (保留：供错误处理)
-from ming_sim.models import Character, LLMConfig, date_label, monthly_amount
+from ming_sim.models import Character, LLMConfig, monthly_amount
 
 WEB_DIST = bundled_path("web", "dist")
 # 用户上传的自定义立绘存档级目录（不随 build 清空，git 可忽略）。
@@ -938,49 +938,6 @@ class WebGame:
                 displaced_minister=displaced,
                 secret_order_id=secret_order_id,
             )
-            minister_message_id = int(payload.get("minister_message_id") or 0)
-            if minister_message_id:
-                tool_summary = {
-                    "proposed_directive": proposed,
-                    "appointed_minister": appointed,
-                    "registered_minister": registered,
-                    "displaced_minister": displaced,
-                    "secret_order_id": secret_order_id,
-                    "court_action": court_action,
-                    "next_minister": next_minister,
-                }
-                ev_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
-
-                def on_event(kind: str, data: str) -> None:
-                    ev_queue.put({"type": kind, "content": data})
-
-                def worker() -> None:
-                    try:
-                        result = self.session.resolve_immediate(
-                            source_kind="chat_message",
-                            source_id=str(minister_message_id),
-                            minister_name=minister_name,
-                            title=f"{date_label(self.state.year, self.state.period, self.state.day)}召对{minister_name}",
-                            trigger_text=text,
-                            response_text=answer,
-                            tool_result=json.dumps(tool_summary, ensure_ascii=False, sort_keys=False),
-                            on_event=on_event,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        result = {"status": "error", "error": str(exc), "court_event": None}
-                        ev_queue.put({"type": "immediate_error", "content": str(exc)})
-                    ev_queue.put({"type": "__immediate_done__", "result": result})
-
-                thread = threading.Thread(target=worker, daemon=True)
-                thread.start()
-                while True:
-                    item = ev_queue.get()
-                    if item["type"] == "__immediate_done__":
-                        result = item.get("result") or {}
-                        payload["court_event"] = result.get("court_event")
-                        payload["state"] = self.state_payload()
-                        break
-                    yield item
             yield {"type": "done", "payload": payload}
         except Exception as error:
             if isinstance(error, LLMUnavailable):
@@ -1404,17 +1361,6 @@ async def api_create_secret_order(minister_name: str, request: SecretOrderReques
         game.session.state, minister_name, title, content, request.tags, deadline_months=request.deadline_months
     )
     order = game.db.get_secret_order(order_id) or {}
-    immediate: Dict[str, Any] = {}
-    if order.get("status") == "active":
-        immediate = game.session.resolve_immediate(
-            source_kind="secret_order",
-            source_id=str(order_id),
-            minister_name=minister_name,
-            title=f"密令：{title}",
-            trigger_text=content,
-            response_text=f"密令交付{minister_name}",
-            tool_result=json.dumps({"order_id": order_id, "tags": request.tags, "deadline_months": request.deadline_months}, ensure_ascii=False),
-        )
     print(f"[secret_order/api] 直接落库 minister={minister_name} title={title!r} id={order_id}")
     return {
         "order_id": order_id,
@@ -1422,7 +1368,7 @@ async def api_create_secret_order(minister_name: str, request: SecretOrderReques
         "title": title,
         "status": order.get("status") or "active",
         "destination_location": order.get("destination_location") or "",
-        "court_event": immediate.get("court_event"),
+        "court_event": None,
     }
 
 

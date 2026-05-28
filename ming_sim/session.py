@@ -31,7 +31,7 @@ from ming_sim.decree import (
 )
 from ming_sim.issues import bind_content as _bind_issues
 from ming_sim.llm_model import create_agno_db, extract_agent_text, verify_llm_available
-from ming_sim.models import Character, CourtContext, GameState, LLMConfig, date_label
+from ming_sim.models import Character, CourtContext, GameState, LLMConfig
 from ming_sim.paths import user_data_path
 from ming_sim.registry import MinisterRegistry, bind_content as _bind_registry
 from ming_sim.skills import bind_content as _bind_skills
@@ -924,24 +924,11 @@ class GameSession:
     def _deliver_letter_reply(self, dispatch: Dict[str, object], on_event=None) -> Dict[str, object]:
         payload = dispatch.get("payload") if isinstance(dispatch.get("payload"), dict) else {}
         minister_name = str(dispatch.get("sender_name") or "")
-        message = str((payload or {}).get("message") or "")
         reply_text = str((payload or {}).get("reply_text") or dispatch.get("reply_text") or "")
         if reply_text:
             self.db.append_chat_message(minister_name, self.state.turn, "minister", reply_text)
-        result = self.resolve_immediate(
-            source_kind="letter_reply",
-            source_id=str(dispatch["id"]),
-            minister_name=minister_name,
-            title=f"{date_label(self.state.year, self.state.period, self.state.day)}{minister_name}回信抵京",
-            trigger_text=message,
-            response_text=reply_text,
-            tool_result="",
-            on_event=on_event,
-        )
-        court_event = result.get("court_event") if isinstance(result, dict) else None
-        event_id = int(court_event.get("id") or 0) if isinstance(court_event, dict) else 0
-        self.db.complete_dispatch(int(dispatch["id"]), self.state, status="completed", reply_text=reply_text, court_event_id=event_id)
-        return {"id": int(dispatch["id"]), "kind": "letter_reply", "status": "completed", "court_event_id": event_id}
+        self.db.complete_dispatch(int(dispatch["id"]), self.state, status="completed", reply_text=reply_text, court_event_id=0)
+        return {"id": int(dispatch["id"]), "kind": "letter_reply", "status": "completed", "court_event_id": 0}
 
     def _deliver_decree(self, dispatch: Dict[str, object], on_event=None) -> Dict[str, object]:
         payload = dispatch.get("payload") if isinstance(dispatch.get("payload"), dict) else {}

@@ -55,6 +55,33 @@ class LocationDispatchTests(unittest.TestCase):
         finally:
             session.close()
 
+    def test_letter_reply_arrival_does_not_auto_apply_immediate_effects(self) -> None:
+        session = self.make_session()
+        db = session.db
+        try:
+            dispatch_id = db.create_dispatch(
+                session.state,
+                kind="letter_reply",
+                direction="inbound",
+                source_kind="letter",
+                source_id="1",
+                sender_name="孙传庭",
+                recipient_name="皇帝",
+                origin_location="henan",
+                destination_location=session.state.court_location,
+                payload={"message": "问河南民情。", "reply_text": "臣谨陈传信办法，待奉明旨再行。"},
+            )
+            session.state.turn += 2
+            processed = session.process_arrived_dispatches()
+            self.assertEqual(processed[0]["id"], dispatch_id)
+            self.assertEqual(processed[0]["court_event_id"], 0)
+            row = db.conn.execute("SELECT COUNT(*) AS n FROM court_events WHERE source_kind='letter_reply'").fetchone()
+            self.assertEqual(int(row["n"]), 0)
+            history = db.load_all_chat_history()
+            self.assertIn("臣谨陈传信办法", history["孙传庭"][-1]["content"])
+        finally:
+            session.close()
+
     def test_remote_secret_order_is_in_transit_until_delivery(self) -> None:
         session = self.make_session()
         db = session.db
