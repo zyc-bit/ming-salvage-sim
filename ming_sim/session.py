@@ -22,7 +22,11 @@ from ming_sim.context import (
     victory_status,
 )
 from ming_sim.db import GameDB, infer_office_type_from_office, normalize_office
-from ming_sim.decree import advance_without_edict, resolve_directives, write_decree_with_agno
+from ming_sim.decree import (
+    resolve_immediate_event,
+    resolve_month_end,
+    write_decree_with_agno,
+)
 from ming_sim.issues import bind_content as _bind_issues
 from ming_sim.llm_model import create_agno_db, extract_agent_text, verify_llm_available
 from ming_sim.models import Character, CourtContext, GameState, LLMConfig
@@ -114,6 +118,7 @@ class ChatTurnResult:
 class TurnSnapshot:
     year: int
     period: int
+    day: int
     turn: int
     phase: str
     metrics: Dict[str, int]
@@ -406,10 +411,18 @@ class GameSession:
         self.state.turn_phase = phase.value
         self.db.save_state(self.state)
 
+    def refresh_court_context(self) -> None:
+        """同一日即时落数后刷新大臣 Agent 的入殿盘面上下文，不推进日期。"""
+        _sync_offices_from_db_impl(self.content, self.db)
+        self.previous_summary = self.db.previous_turn_summary(self.state) or ""
+        context = CourtContext(state=self.state, db=self.db, previous_summary=self.previous_summary)
+        self.registry = MinisterRegistry(self.llm_config, self.agno_db, context)
+
     def turn_snapshot(self) -> TurnSnapshot:
         return TurnSnapshot(
             year=self.state.year,
             period=self.state.period,
+            day=self.state.day,
             turn=self.state.turn,
             phase=self.state.turn_phase,
             metrics=dict(self.state.metrics),
@@ -418,7 +431,7 @@ class GameSession:
         )
 
     def end_turn(self) -> None:
-        """回合结束（resolve 已推进 state.turn）；阶段回 summoning。"""
+        """兼容旧 CLI：阶段回 summoning。日制推进由 end_day 负责。"""
         self.state.turn_phase = TurnPhase.SUMMONING.value
         self.db.save_state(self.state)
 
@@ -783,39 +796,110 @@ class GameSession:
         return decree
 
     def resolve_turn(self, decree: str = "", on_event=None) -> str:
-        """颁诏并推演本回合。要求无 pending 残留、≥1 条 draft。
+        """颁诏并即时推演。要求无 pending 残留、≥1 条 draft。
 
-        on_event(kind, data): 推演过程实时回调，透传给 resolve_directives。
+        日制改造后，颁诏不推进日期；第 30 日退朝才跑月终结算。
         """
         if self.pending_count() > 0:
             raise ValueError(f"尚有 {self.pending_count()} 道大臣拟旨待陛下核定（准/驳），不能颁诏。")
         directives = self.db.list_directives(self.state, statuses=("draft",))
         if not directives:
             raise ValueError("网页/CLI 端不允许跳过回合：至少一条草案才能颁诏。")
-        # 结算前先存一份：LLM 推演有可能崩，留个回滚锚点
-        self.auto_save("preresolve")
         decree_text = decree or self.last_decree or write_decree_with_agno(
             self.llm_config, self.agno_db, self.state, directives, db=self.db
         )
-        report = resolve_directives(
-            self.state, self.db, self.agno_db, self.llm_config,
-            directives, decree_text, deaths_this_turn=self.deaths_this_turn,
-            debuts_this_turn=self.debuts_this_turn,
+        self.auto_save("preissue")
+        directive_ids = [str(int(row["id"])) for row in directives]
+        directives_brief = [
+            f"#{int(row['id'])} {str(row['text']).strip()}"
+            for row in directives
+        ]
+        self.db.mark_directives_issued(self.state)
+        result = resolve_immediate_event(
+            self.state,
+            self.db,
+            self.agno_db,
+            self.llm_config,
+            source_kind="decree",
+            source_id=",".join(directive_ids),
+            minister_name="",
+            title="颁布诏书",
+            trigger_text=decree_text,
+            response_text="\n".join(directives_brief),
+            tool_result="",
             on_event=on_event,
             content=self.content, registry=self.registry,
         )
+        report = str(result.get("narrative") or "")
         self.last_report = report
         self.last_decree = decree_text
-        # resolve_directives 已 next_period + save_state；阶段标 issued
-        self.state.turn_phase = TurnPhase.ISSUED.value
-        self.db.save_state(self.state)
-        return report
-
-    def advance_without_decree(self) -> None:
-        """CLI 退朝无草案：仅财政 tick + 推进。"""
-        advance_without_edict(self.state, self.db)
         self.state.turn_phase = TurnPhase.SUMMONING.value
         self.db.save_state(self.state)
+        self.refresh_court_context()
+        return report
+
+    def resolve_immediate(
+        self,
+        source_kind: str,
+        source_id: str,
+        minister_name: str = "",
+        title: str = "",
+        trigger_text: str = "",
+        response_text: str = "",
+        tool_result: str = "",
+        on_event=None,
+    ) -> Dict[str, object]:
+        result = resolve_immediate_event(
+            self.state,
+            self.db,
+            self.agno_db,
+            self.llm_config,
+            source_kind=source_kind,
+            source_id=source_id,
+            minister_name=minister_name,
+            title=title,
+            trigger_text=trigger_text,
+            response_text=response_text,
+            tool_result=tool_result,
+            on_event=on_event,
+            content=self.content,
+            registry=self.registry,
+        )
+        self.refresh_court_context()
+        return result
+
+    def advance_without_decree(self) -> None:
+        """兼容旧 CLI：普通退朝至明日；第 30 日跑月终。"""
+        self.end_day()
+
+    def end_day(self, on_event=None) -> str:
+        """退朝至明日；第 30 日退朝时跑月终流式结算。"""
+        if self.pending_count() > 0:
+            raise ValueError(f"尚有 {self.pending_count()} 道大臣拟旨待陛下核定（准/驳），不能退朝。")
+        draft_count = len(self.db.list_directives(self.state, statuses=("draft",)))
+        if draft_count:
+            raise ValueError(f"尚有 {draft_count} 道诏书草案未颁布或删除，不能退朝。")
+        self.auto_save("endday")
+        if int(self.state.day) >= 30:
+            report = resolve_month_end(
+                self.state,
+                self.db,
+                self.agno_db,
+                self.llm_config,
+                deaths_this_turn=self.deaths_this_turn,
+                debuts_this_turn=self.debuts_this_turn,
+                on_event=on_event,
+                content=self.content,
+                registry=self.registry,
+            )
+            self.last_report = report
+        else:
+            self.state.next_day()
+            self.db.save_state(self.state)
+            report = ""
+        self.state.turn_phase = TurnPhase.SUMMONING.value
+        self.db.save_state(self.state)
+        return report
 
     def victory(self) -> Dict[str, object]:
         return victory_status(self.db, self.state)
@@ -834,7 +918,7 @@ class GameSession:
                 self.db.kv_set("campaign_id", campaign_id)
             fname = (
                 f"{AUTO_SAVE_PREFIX}{campaign_id}_{self.state.year:04d}_"
-                f"{self.state.period:02d}_t{self.state.turn:04d}_{tag}.db"
+                f"{self.state.period:02d}_{self.state.day:02d}_t{self.state.turn:04d}_{tag}.db"
             )
             target = _os.path.join(saves_dir, fname)
             self.db.backup_to(target)

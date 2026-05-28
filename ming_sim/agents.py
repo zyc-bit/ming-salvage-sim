@@ -312,6 +312,38 @@ def create_season_simulator_agent(
     )
 
 
+IMMEDIATE_SIMULATOR_PROMPT = (
+    "【即时回奏模式强制规则】若 simulator_payload.mode 为 immediate："
+    "你不是写月末奏章，而是写当日当场回奏。只评估 immediate_trigger 中这一次召对、颁诏或密令登记造成的即时后果；"
+    "不得写固定财政、军饷、建筑维护/产出、月末候选历史情势，不推进日期。"
+    "输出中文短奏，须能让档房抽取这一次事件造成的国势、钱粮、地区、军队、势力、局势、人事或密令变化。"
+)
+
+
+def create_immediate_simulator_agent(
+    llm_config: LLMConfig,
+    agno_db: SqliteDb,
+    simulator_payload: Optional[Dict[str, object]] = None,
+) -> Agent:
+    """日制即时回奏推演官。复用月末推演盘面，但末尾追加即时模式覆盖规则。"""
+    cfg = _llm_for_role(llm_config, "simulator")
+    tlog(f"[simulator/immediate] 使用模型 {cfg.model}")
+    simulator_context = (
+        "【本次即时推演输入 simulator_payload】\n"
+        + json.dumps(simulator_payload or {}, ensure_ascii=False, sort_keys=False)
+    )
+    return Agent(
+        name="即时回奏推演官",
+        id="immediate-simulator",
+        session_id="immediate-simulator",
+        db=agno_db,
+        model=create_chat_model(cfg, temperature=0.7, top_p=0.9, max_tokens=cfg.max_tokens, enable_thinking=True),
+        instructions=[_ctx().game_world_prompt, simulator_context, _ctx().season_simulator_prompt, IMMEDIATE_SIMULATOR_PROMPT],
+        add_history_to_context=False,
+        markdown=False,
+    )
+
+
 def create_score_extractor_agent(llm_config: LLMConfig, agno_db: SqliteDb) -> Agent:
     """打分提取员。走 advanced 角色派生：若 advanced_model 已配，用更强模型。"""
     cfg = _llm_for_role(llm_config, "extractor")
@@ -357,6 +389,20 @@ def create_score_extractor_module_agent(
         "【结算补充上下文 extractor_context】\n"
         + json.dumps(supplemental_context or {}, ensure_ascii=False, sort_keys=False)
     )
+    extra_instructions: List[str] = []
+    mode = str((supplemental_context or {}).get("mode") or "")
+    if mode == "immediate":
+        extra_instructions.append(
+            "【即时回奏抽取规则】当前是 immediate 模式。只抽本次 immediate_trigger 造成的即时变化；"
+            "禁止抽固定财政、军饷、建筑维护/产出、月末候选历史情势、issue 自然惯性，也不要把日期向后推进。"
+            "如果 narrative 只是态度、承诺、拟议而没有实际落地，输出空字段。"
+        )
+    elif mode == "month_end":
+        extra_instructions.append(
+            "【月终抽取规则】当前是 month_end 模式。court_events 中的即时事件已在发生当日落数；"
+            "月终只抽固定收支之外的月终自然推进、到期密令核议、候选历史情势与确属月终的新后果，"
+            "不得重复抽取 court_events 已记录的召对/诏令硬效果。"
+        )
     return Agent(
         name=f"档房书办-{module}",
         id=f"score-extractor-{module}",
@@ -370,7 +416,7 @@ def create_score_extractor_module_agent(
             enable_thinking=False,
             force_json_output=True,
         ),
-        instructions=[ctx.game_world_prompt, simulator_context, ctx.score_extractor_shared_prompt, supplemental, prompt],
+        instructions=[ctx.game_world_prompt, simulator_context, ctx.score_extractor_shared_prompt, supplemental, prompt, *extra_instructions],
         add_history_to_context=False,
         markdown=False,
     )

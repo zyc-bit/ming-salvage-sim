@@ -3412,6 +3412,31 @@ button:disabled {
   color: #6a5a3a;
   font-size: 0.82rem;
 }
+
+.chat-immediate-feedback {
+  align-self: stretch;
+  max-width: 86%;
+  padding: 10px 12px;
+  border: 1px solid rgba(63, 122, 97, 0.28);
+  border-radius: 5px;
+  color: #2f513d;
+  background: rgba(229, 241, 219, 0.78);
+}
+
+.chat-immediate-feedback b,
+.chat-immediate-feedback span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-immediate-feedback pre {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  line-height: 1.6;
+}
 .menu-hint code {
   background: rgba(120, 80, 30, 0.12);
   padding: 1px 4px;

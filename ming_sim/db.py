@@ -100,8 +100,17 @@ class GameDB:
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 year INTEGER NOT NULL,
                 period INTEGER NOT NULL,
+                day INTEGER NOT NULL DEFAULT 1,
                 turn INTEGER NOT NULL,
                 turn_phase TEXT NOT NULL DEFAULT 'summoning'
+            );
+
+            CREATE TABLE IF NOT EXISTS turn_calendar (
+                turn INTEGER PRIMARY KEY,
+                year INTEGER NOT NULL,
+                period INTEGER NOT NULL,
+                day INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS metrics (
@@ -417,6 +426,33 @@ class GameDB:
             CREATE INDEX IF NOT EXISTS idx_chat_messages_turn
                 ON chat_messages(turn);
 
+            CREATE TABLE IF NOT EXISTS court_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                turn INTEGER NOT NULL,
+                year INTEGER NOT NULL,
+                period INTEGER NOT NULL,
+                day INTEGER NOT NULL DEFAULT 1,
+                source_kind TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                minister_name TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                trigger_text TEXT NOT NULL DEFAULT '',
+                response_text TEXT NOT NULL DEFAULT '',
+                tool_result TEXT NOT NULL DEFAULT '',
+                narrative TEXT NOT NULL DEFAULT '',
+                extractor_output TEXT NOT NULL DEFAULT '',
+                applied_summary TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                error TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(source_kind, source_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_court_events_turn
+                ON court_events(turn, id);
+            CREATE INDEX IF NOT EXISTS idx_court_events_date
+                ON court_events(year, period, day, id);
+
             CREATE TABLE IF NOT EXISTS secret_orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 turn_issued INTEGER NOT NULL,
@@ -650,6 +686,8 @@ class GameDB:
         self.ensure_column("characters", "aliases", "TEXT NOT NULL DEFAULT '[]'")
         # 步骤7：回合阶段（旧库迁移，schema 升级非 fallback）
         self.ensure_column("game_state", "turn_phase", "TEXT NOT NULL DEFAULT 'summoning'")
+        self.ensure_column("game_state", "day", "INTEGER NOT NULL DEFAULT 1")
+        self.ensure_column("court_events", "day", "INTEGER NOT NULL DEFAULT 1")
         # 密令推演副作用列（result 留给承办人进展，sim_note 给推演写泄漏/反弹，互不覆盖）
         self.ensure_column("secret_orders", "sim_note", "TEXT NOT NULL DEFAULT ''")
         # 密令期限：0=无硬期限；到 due_turn 时自动转入待核议，由推演当月判 done/failed。
@@ -1011,12 +1049,23 @@ class GameDB:
     def save_state(self, state: GameState) -> None:
         self.conn.execute(
             """
-            INSERT INTO game_state (id, year, period, turn, turn_phase)
-            VALUES (1, ?, ?, ?, ?)
+            INSERT INTO game_state (id, year, period, day, turn, turn_phase)
+            VALUES (1, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET year = excluded.year, period = excluded.period,
-                turn = excluded.turn, turn_phase = excluded.turn_phase
+                day = excluded.day, turn = excluded.turn, turn_phase = excluded.turn_phase
             """,
-            (state.year, state.period, state.turn, state.turn_phase),
+            (state.year, state.period, state.day, state.turn, state.turn_phase),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO turn_calendar (turn, year, period, day)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(turn) DO UPDATE SET
+                year = excluded.year,
+                period = excluded.period,
+                day = excluded.day
+            """,
+            (state.turn, state.year, state.period, state.day),
         )
         for key, value in state.metrics.items():
             self.conn.execute(
@@ -1031,7 +1080,7 @@ class GameDB:
         self.conn.commit()
 
     def load_state(self, start_ym: str = "") -> GameState:
-        row = self.conn.execute("SELECT year, period, turn, turn_phase FROM game_state WHERE id = 1").fetchone()
+        row = self.conn.execute("SELECT year, period, day, turn, turn_phase FROM game_state WHERE id = 1").fetchone()
         if row is None:
             state = GameState()
             if start_ym:
@@ -1042,7 +1091,8 @@ class GameDB:
                     raise SystemExit(f"--start-ym 格式非法：{start_ym!r}，应为 YYYY.MM（如 1629.04）。")
                 if not (1627 <= y <= 1644 and 1 <= m <= 12):
                     raise SystemExit(f"--start-ym 超范围：{start_ym!r}，年须 1627-1644、月 1-12。")
-                state.turn = (y - 1627) * 12 + (m - 10) + 1
+                state.turn = ((y - 1627) * 12 + (m - 10)) * 30 + 1
+                state.day = 1
                 state.year, state.period = y, m
                 print(f"[调试] 跳到 {y}年{m}月起手（turn={state.turn}）。")
             self.save_state(state)
@@ -1055,7 +1105,7 @@ class GameDB:
             for metric in self.conn.execute("SELECT key, value FROM metrics").fetchall()
         }
         state = GameState(
-            year=int(row["year"]), period=int(row["period"]), turn=int(row["turn"]),
+            year=int(row["year"]), period=int(row["period"]), day=int(row["day"] or 1), turn=int(row["turn"]),
             turn_phase=str(row["turn_phase"] or "summoning"),
         )
         if metrics:
@@ -2964,13 +3014,14 @@ class GameDB:
         )
         self.conn.commit()
 
-    def append_chat_message(self, minister_name: str, turn: int, role: str, content: str) -> None:
+    def append_chat_message(self, minister_name: str, turn: int, role: str, content: str) -> int:
         """召对聊天单条消息落库（chat_messages）。"""
-        self.conn.execute(
+        cur = self.conn.execute(
             "INSERT INTO chat_messages (minister_name, turn, role, content) VALUES (?, ?, ?, ?)",
             (minister_name, turn, role, content),
         )
         self.conn.commit()
+        return int(cur.lastrowid)
 
     def load_all_chat_history(self) -> Dict[str, List[Dict[str, str]]]:
         """读出全部召对记录，按大臣分组，供进程启动时恢复内存缓存。"""
@@ -2983,6 +3034,161 @@ class GameDB:
                 {"role": row["role"], "content": row["content"]}
             )
         return history
+
+    # ----- court_events（日制即时反馈）-----
+
+    def court_event_exists(self, source_kind: str, source_id: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM court_events WHERE source_kind = ? AND source_id = ?",
+            (source_kind, source_id),
+        ).fetchone()
+        return row is not None
+
+    def create_court_event(
+        self,
+        state: GameState,
+        source_kind: str,
+        source_id: str,
+        minister_name: str = "",
+        title: str = "",
+        trigger_text: str = "",
+        response_text: str = "",
+        tool_result: str = "",
+        status: str = "pending",
+    ) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO court_events
+                (turn, year, period, day, source_kind, source_id, minister_name,
+                 title, trigger_text, response_text, tool_result, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_kind, source_id) DO NOTHING
+            """,
+            (
+                state.turn,
+                state.year,
+                state.period,
+                state.day,
+                source_kind,
+                source_id,
+                minister_name,
+                title[:80],
+                trigger_text,
+                response_text,
+                tool_result,
+                status,
+            ),
+        )
+        self.conn.commit()
+        if cur.rowcount:
+            return int(cur.lastrowid)
+        row = self.conn.execute(
+            "SELECT id FROM court_events WHERE source_kind = ? AND source_id = ?",
+            (source_kind, source_id),
+        ).fetchone()
+        return int(row["id"]) if row else 0
+
+    def update_court_event_result(
+        self,
+        event_id: int,
+        status: str,
+        narrative: str = "",
+        extractor_output: str = "",
+        applied_summary: str = "",
+        error: str = "",
+    ) -> None:
+        self.conn.execute(
+            """
+            UPDATE court_events
+            SET status = ?,
+                narrative = ?,
+                extractor_output = ?,
+                applied_summary = ?,
+                error = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (status, narrative, extractor_output, applied_summary, error, int(event_id)),
+        )
+        self.conn.commit()
+
+    def get_court_event(self, event_id: int) -> Optional[Dict[str, object]]:
+        row = self.conn.execute(
+            "SELECT * FROM court_events WHERE id = ?", (int(event_id),)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._court_event_payload(row)
+
+    def get_court_event_by_source(self, source_kind: str, source_id: str) -> Optional[Dict[str, object]]:
+        row = self.conn.execute(
+            "SELECT * FROM court_events WHERE source_kind = ? AND source_id = ?",
+            (source_kind, source_id),
+        ).fetchone()
+        return self._court_event_payload(row) if row else None
+
+    def latest_court_event(self) -> Optional[Dict[str, object]]:
+        row = self.conn.execute(
+            "SELECT * FROM court_events ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return self._court_event_payload(row) if row else None
+
+    def list_court_events(
+        self,
+        year: int = 0,
+        period: int = 0,
+        day: int = 0,
+        limit: int = 30,
+    ) -> List[Dict[str, object]]:
+        clauses: List[str] = []
+        params: List[object] = []
+        if year:
+            clauses.append("year = ?")
+            params.append(int(year))
+        if period:
+            clauses.append("period = ?")
+            params.append(int(period))
+        if day:
+            clauses.append("day = ?")
+            params.append(int(day))
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = self.conn.execute(
+            f"SELECT * FROM court_events {where} ORDER BY id DESC LIMIT ?",
+            [*params, max(1, int(limit))],
+        ).fetchall()
+        return [self._court_event_payload(row) for row in rows]
+
+    def _court_event_payload(self, row: sqlite3.Row) -> Dict[str, object]:
+        def _parse_json(text: str) -> object:
+            raw = (text or "").strip()
+            if not raw:
+                return None
+            try:
+                return json.loads(raw)
+            except Exception:
+                return raw
+
+        return {
+            "id": int(row["id"]),
+            "turn": int(row["turn"]),
+            "year": int(row["year"]),
+            "period": int(row["period"]),
+            "day": int(row["day"] if "day" in row.keys() else 1),
+            "source_kind": row["source_kind"] or "",
+            "source_id": row["source_id"] or "",
+            "minister_name": row["minister_name"] or "",
+            "title": row["title"] or "",
+            "trigger_text": row["trigger_text"] or "",
+            "response_text": row["response_text"] or "",
+            "tool_result": _parse_json(row["tool_result"] or ""),
+            "narrative": row["narrative"] or "",
+            "extractor_output": _parse_json(row["extractor_output"] or ""),
+            "applied_summary": _parse_json(row["applied_summary"] or ""),
+            "status": row["status"] or "",
+            "error": row["error"] or "",
+            "created_at": row["created_at"] or "",
+            "updated_at": row["updated_at"] or "",
+        }
 
     # ----- event memories（渐进式记忆：摘要卡 + 来源摘录） -----
 
@@ -4054,7 +4260,7 @@ class GameDB:
             raise ValueError(f"进行中密令已达上限（20条），请先结案部分密令再下新令。当前：{active_count} 条。")
         tags_json = json.dumps(tags, ensure_ascii=False)
         deadline = max(0, min(int(deadline_months or 0), 36))
-        due_turn = int(state.turn) + deadline if deadline else 0
+        due_turn = int(state.turn) + deadline * 30 if deadline else 0
         cur = self.conn.execute(
             """
             INSERT INTO secret_orders
@@ -4232,7 +4438,7 @@ class GameDB:
             months = max(0, min(int(deadline_months or 0), 36))
         except (TypeError, ValueError):
             months = 1
-        target_turn = int(state.turn) + months
+        target_turn = int(state.turn) + months * 30
         old_due = int(row["due_turn"] or 0)
         stamp = f"〔{period_label(state.year, state.period)}〕"
         why = (reason or "").strip()[:120] or "奉旨加急"

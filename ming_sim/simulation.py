@@ -202,6 +202,7 @@ def build_simulator_payload(
     debuts_this_turn: Optional[List[Dict[str, str]]] = None,
     relevant_memories: Optional[List[Dict[str, object]]] = None,
     secret_orders: Optional[List[Dict[str, object]]] = None,
+    extra_context: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
     active = db.list_active_issues()
     issues_payload = [
@@ -243,9 +244,11 @@ def build_simulator_payload(
             "WHERE status!='offstage' AND office_type!='后宫' ORDER BY rowid"
         ).fetchall()
     ]
-    return {
+    payload: Dict[str, object] = {
         "year": state.year,
         "period": state.period,
+        "day": state.day,
+        "date": {"year": state.year, "period": state.period, "day": state.day, "turn": state.turn},
         "decree_text": decree_text,
         "directives": directives_brief,
         "current_state": dict(state.metrics),
@@ -269,6 +272,9 @@ def build_simulator_payload(
         "secret_orders": secret_orders or [],
         "data_note": "regions/armies/buildings 均为 header+二维数组（cols 列名 + rows 数据）。secret_orders 为皇帝密令列表，独立于 relevant_memories，每条含 id/minister_name/title/content/status/result 字段。",
     }
+    if extra_context:
+        payload.update(extra_context)
+    return payload
 
 
 def simulate_season_with_agno(
@@ -320,6 +326,7 @@ def simulate_season_with_payload(
     relevant_memories: Optional[List[Dict[str, object]]] = None,
     secret_orders: Optional[List[Dict[str, object]]] = None,
     simulator_payload: Optional[Dict[str, object]] = None,
+    extra_context: Optional[Dict[str, object]] = None,
 ) -> tuple[str, Dict[str, object]]:
     """推演 agent，同时返回本次推演 user payload，供 extractor 复用缓存前缀。"""
     payload = simulator_payload or build_simulator_payload(
@@ -329,10 +336,26 @@ def simulate_season_with_payload(
         debuts_this_turn=debuts_this_turn,
         relevant_memories=relevant_memories,
         secret_orders=secret_orders,
+        extra_context=extra_context,
     )
+    mode = str(payload.get("mode") or "month_end")
+    if mode == "immediate":
+        instruction = (
+            "即时回奏模式：只根据 simulator_payload.immediate_trigger 写本次召对/诏令的即时回奏。"
+            "不要跑固定财政、军饷、建筑维护/产出，不推进日期，不写月末总结；"
+            "可以写本次动作已造成的即时盘面后果，篇幅控制在 300-700 字。"
+        )
+    elif mode == "month_end":
+        instruction = (
+            "月终退朝模式：写本月第30日退朝后的月终奏章。"
+            "本月 court_events 里的即时事件已经逐次落数，只可概括其过程，"
+            "不得把这些召对/诏令的硬效果重复写成新落账；重点处理固定收支、局势自然惯性、到期密令与候选历史情势。"
+        )
+    else:
+        instruction = "请根据 system 中的 simulator_payload 写本月月末奏章。"
     raw = run_agent_stream_text(
         agent,
-        json.dumps({"instruction": "请根据 system 中的 simulator_payload 写本月月末奏章。"}, ensure_ascii=False),
+        json.dumps({"instruction": instruction}, ensure_ascii=False),
         tag="simulator",
         on_thinking=on_thinking,
         on_text=on_text,
@@ -349,6 +372,7 @@ def extract_scores_with_agno(
     sanitizer: Optional[Agent] = None,
     relevant_memories: Optional[List[Dict[str, object]]] = None,
     secret_orders: Optional[List[Dict[str, object]]] = None,
+    extra_context: Optional[Dict[str, object]] = None,
 ) -> tuple[Dict[str, object], str, str]:
     """结算 agent: 读邸报抽 JSON。"""
     active = db.list_active_issues()
@@ -398,7 +422,7 @@ def extract_scores_with_agno(
         ).fetchall()
     ]
     payload = {
-        "turn": {"year": state.year, "period": state.period, "turn": state.turn},
+        "turn": {"year": state.year, "period": state.period, "day": state.day, "turn": state.turn},
         "narrative": narrative,
         "decree_text": decree_text,
         "active_issues": issues_brief,
@@ -421,6 +445,8 @@ def extract_scores_with_agno(
         "secret_orders": secret_orders or [],
         "_format_note": "regions/armies/buildings/powers/active_ministers/offstage_ministers 均为 header+二维数组（cols 列名 + rows 数据）。secret_orders 独立字段，含 id/minister_name/title/content/status/result。",
     }
+    if extra_context:
+        payload.update(extra_context)
     payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=False)
     tlog(f"[extractor] user payload total={len(payload_json)} chars (~{len(payload_json)//1.5:.0f} tok)")
     raw = run_agent_text(agent, payload_json, tag="extractor")
@@ -478,6 +504,7 @@ def _extractor_context_payload(
     decree_text: str,
     relevant_memories: Optional[List[Dict[str, object]]] = None,
     secret_orders: Optional[List[Dict[str, object]]] = None,
+    extra_context: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
     active = db.list_active_issues()
     issues_brief = [
@@ -519,8 +546,8 @@ def _extractor_context_payload(
             "FROM characters WHERE status='offstage' ORDER BY name"
         ).fetchall()
     ]
-    return {
-        "turn": {"year": state.year, "period": state.period, "turn": state.turn},
+    payload: Dict[str, object] = {
+        "turn": {"year": state.year, "period": state.period, "day": state.day, "turn": state.turn},
         "narrative": narrative,
         "decree_text": decree_text,
         "active_issues": issues_brief,
@@ -543,6 +570,9 @@ def _extractor_context_payload(
         "secret_orders": secret_orders or [],
         "_format_note": "regions/armies/buildings/powers/active_ministers/offstage_ministers 均为 header+二维数组（cols 列名 + rows 数据）。",
     }
+    if extra_context:
+        payload.update(extra_context)
+    return payload
 
 
 def _extractor_compat_payload(base: Dict[str, object]) -> Dict[str, object]:
@@ -579,12 +609,14 @@ def build_extractor_shared_context(
     decree_text: str,
     relevant_memories: Optional[List[Dict[str, object]]] = None,
     secret_orders: Optional[List[Dict[str, object]]] = None,
+    extra_context: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
     """供模块 extractor 放入 system 前缀的共同结算补充上下文。"""
     base = _extractor_context_payload(
         db, state, narrative, decree_text,
         relevant_memories=relevant_memories,
         secret_orders=secret_orders,
+        extra_context=extra_context,
     )
     return _extractor_compat_payload(base)
 
@@ -773,12 +805,14 @@ def extract_scores_by_modules_with_agno(
     sanitizer: Optional[Agent] = None,
     relevant_memories: Optional[List[Dict[str, object]]] = None,
     secret_orders: Optional[List[Dict[str, object]]] = None,
+    extra_context: Optional[Dict[str, object]] = None,
 ) -> tuple[Dict[str, object], str, str]:
     """四模块结算 extractor：内政财政、军务外势、局势、人事密令。"""
     base_payload = _extractor_context_payload(
         db, state, narrative, decree_text,
         relevant_memories=relevant_memories,
         secret_orders=secret_orders,
+        extra_context=extra_context,
     )
     module_outputs: Dict[str, Dict[str, object]] = {}
     module_raw: Dict[str, str] = {}

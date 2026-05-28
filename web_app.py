@@ -39,7 +39,7 @@ from ming_sim.skills import available_skill_ids, skill_display_name, skill_sourc
 from ming_sim.context import match_minister_from_text
 from ming_sim.flows import calc_province_fiscal
 from ming_sim.exceptions import LLMContractError  # noqa: F401  (保留：供错误处理)
-from ming_sim.models import Character, LLMConfig, monthly_amount
+from ming_sim.models import Character, LLMConfig, date_label, monthly_amount
 
 WEB_DIST = bundled_path("web", "dist")
 # 用户上传的自定义立绘存档级目录（不随 build 清空，git 可忽略）。
@@ -663,9 +663,12 @@ class WebGame:
 
     def state_payload(self) -> Dict[str, Any]:
         directives = [self.directive_payload(row) for row in self.directive_rows()]
+        today_events = self.db.list_court_events(
+            year=self.state.year, period=self.state.period, day=self.state.day, limit=20
+        )
         return {
             "turn": {"year": self.state.year, "period": self.state.period,
-                     "turn": self.state.turn, "phase": self.state.turn_phase},
+                     "day": self.state.day, "turn": self.state.turn, "phase": self.state.turn_phase},
             "metrics": self.state.metrics,
             "previous_summary": self.previous_summary,
             "treasury": self.db.treasury_report(self.state),
@@ -693,6 +696,9 @@ class WebGame:
             ],
             "directives": directives,
             "pending_count": self.session.pending_count(),
+            "today_events": today_events,
+            "court_events": self.db.list_court_events(year=self.state.year, period=self.state.period, limit=80),
+            "month_end_due": int(self.state.day) >= 30,
             "last_decree": self.last_decree,
             "last_report": self.last_report,
         }
@@ -712,8 +718,9 @@ class WebGame:
     ) -> Dict[str, Any]:
         character = self.session._character(minister_name)
         self.chat_history[minister_name].append({"role": "minister", "content": answer})
+        message_id = 0
         if minister_name not in self.session.temporary_characters:
-            self.db.append_chat_message(minister_name, self.state.turn, "minister", answer)
+            message_id = self.db.append_chat_message(minister_name, self.state.turn, "minister", answer)
         return {
             "minister": minister_name,
             "answer": answer,
@@ -727,6 +734,7 @@ class WebGame:
             "secret_order_id": secret_order_id or 0,
             "directives": [self.directive_payload(row) for row in self.directive_rows()],
             "suggestions": self.suggestions_for(character),
+            "minister_message_id": message_id,
         }
 
     def chat(self, minister_name: str, message: str) -> Dict[str, Any]:
@@ -862,6 +870,49 @@ class WebGame:
                 displaced_minister=displaced,
                 secret_order_id=secret_order_id,
             )
+            minister_message_id = int(payload.get("minister_message_id") or 0)
+            if minister_message_id:
+                tool_summary = {
+                    "proposed_directive": proposed,
+                    "appointed_minister": appointed,
+                    "registered_minister": registered,
+                    "displaced_minister": displaced,
+                    "secret_order_id": secret_order_id,
+                    "court_action": court_action,
+                    "next_minister": next_minister,
+                }
+                ev_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
+
+                def on_event(kind: str, data: str) -> None:
+                    ev_queue.put({"type": kind, "content": data})
+
+                def worker() -> None:
+                    try:
+                        result = self.session.resolve_immediate(
+                            source_kind="chat_message",
+                            source_id=str(minister_message_id),
+                            minister_name=minister_name,
+                            title=f"{date_label(self.state.year, self.state.period, self.state.day)}召对{minister_name}",
+                            trigger_text=text,
+                            response_text=answer,
+                            tool_result=json.dumps(tool_summary, ensure_ascii=False, sort_keys=False),
+                            on_event=on_event,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        result = {"status": "error", "error": str(exc), "court_event": None}
+                        ev_queue.put({"type": "immediate_error", "content": str(exc)})
+                    ev_queue.put({"type": "__immediate_done__", "result": result})
+
+                thread = threading.Thread(target=worker, daemon=True)
+                thread.start()
+                while True:
+                    item = ev_queue.get()
+                    if item["type"] == "__immediate_done__":
+                        result = item.get("result") or {}
+                        payload["court_event"] = result.get("court_event")
+                        payload["state"] = self.state_payload()
+                        break
+                    yield item
             yield {"type": "done", "payload": payload}
         except Exception as error:
             if isinstance(error, LLMUnavailable):
@@ -1281,8 +1332,17 @@ async def api_create_secret_order(minister_name: str, request: SecretOrderReques
     order_id = game.db.create_secret_order(
         game.session.state, minister_name, title, content, request.tags, deadline_months=request.deadline_months
     )
+    immediate = game.session.resolve_immediate(
+        source_kind="secret_order",
+        source_id=str(order_id),
+        minister_name=minister_name,
+        title=f"密令：{title}",
+        trigger_text=content,
+        response_text=f"密令交付{minister_name}",
+        tool_result=json.dumps({"order_id": order_id, "tags": request.tags, "deadline_months": request.deadline_months}, ensure_ascii=False),
+    )
     print(f"[secret_order/api] 直接落库 minister={minister_name} title={title!r} id={order_id}")
-    return {"order_id": order_id, "minister_name": minister_name, "title": title, "status": "active"}
+    return {"order_id": order_id, "minister_name": minister_name, "title": title, "status": "active", "court_event": immediate.get("court_event")}
 
 
 @app.post("/api/ministers/{minister_name}/chat")
@@ -1299,6 +1359,8 @@ async def api_chat_stream(minister_name: str, request: ChatRequest) -> Streaming
             item_type = str(item.get("type", "message"))
             if item_type == "delta":
                 yield sse_event("delta", {"content": item.get("content", "")})
+            elif item_type in {"immediate_stage", "immediate_thinking", "immediate_text", "immediate_done", "immediate_error"}:
+                yield sse_event(item_type, {"content": item.get("content", "")})
             elif item_type == "done":
                 yield sse_event("done", item.get("payload", {}))
             elif item_type == "error":
@@ -1369,13 +1431,12 @@ async def api_write_decree() -> Dict[str, Any]:
 
 @app.post("/api/decree/issue")
 async def api_issue_decree() -> Dict[str, Any]:
-    """非流式颁诏（保留兼容）。前端默认走 /api/decree/issue/stream。"""
+    """非流式颁诏即时结算（保留兼容）。前端默认走 /api/decree/issue/stream。"""
     try:
         report = get_game().session.resolve_turn()
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
     decree = get_game().session.last_decree
-    get_game().refresh_turn()
     return {"decree": decree, "report": report, "state": get_game().state_payload()}
 
 
@@ -1396,7 +1457,6 @@ async def api_issue_decree_stream() -> StreamingResponse:
         try:
             report = get_game().session.resolve_turn(on_event=on_event)
             decree = get_game().session.last_decree
-            get_game().refresh_turn()
             ev_queue.put(("__done__", {
                 "decree": decree,
                 "report": report,
@@ -1420,6 +1480,44 @@ async def api_issue_decree_stream() -> StreamingResponse:
                 yield sse_event("error", data if isinstance(data, dict) else {"message": data})
                 break
             # stage / thinking / text
+            yield sse_event(kind, {"content": data})
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@app.post("/api/day/end/stream")
+async def api_end_day_stream() -> StreamingResponse:
+    """退朝至明日；若当前是第 30 日，流式跑月终结算。"""
+    ev_queue: "queue.Queue[tuple[str, Any]]" = queue.Queue()
+
+    def on_event(kind: str, data: str) -> None:
+        ev_queue.put((kind, data))
+
+    def worker() -> None:
+        try:
+            report = get_game().session.end_day(on_event=on_event)
+            get_game().refresh_turn()
+            ev_queue.put(("__done__", {
+                "report": report,
+                "state": get_game().state_payload(),
+            }))
+        except ValueError as e:
+            ev_queue.put(("__error__", str(e)))
+        except Exception as e:  # noqa: BLE001
+            ev_queue.put(("__error__", _llm_error_detail(e) if isinstance(e, LLMUnavailable) else str(e)))
+
+    async def generate() -> AsyncIterator[str]:
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        loop = asyncio.get_running_loop()
+        while True:
+            kind, data = await loop.run_in_executor(None, ev_queue.get)
+            if kind == "__done__":
+                yield sse_event("done", data)
+                break
+            if kind == "__error__":
+                yield sse_event("error", data if isinstance(data, dict) else {"message": data})
+                break
             yield sse_event(kind, {"content": data})
 
     return StreamingResponse(generate(), media_type="text/event-stream")

@@ -69,7 +69,7 @@ def build_court_brief(context: CourtContext) -> str:
         )
     issues_brief = "；".join(issue_lines) if issue_lines else "无"
     return (
-        f"本{TURN_UNIT}：{context.state.year}年{context.state.period}月（第{context.state.turn}回合）。"
+        f"今日：{context.state.year}年{context.state.period}月{context.state.day}日（第{context.state.turn}日）。"
         f"钱粮：{money_line}国势：{score_line}。"
         f"在办事项：{issues_brief}。"
         f"势力：{context.db.power_report(exclude_self=True)}。"
@@ -108,7 +108,7 @@ def build_secret_order_brief(character: Character, context: CourtContext) -> str
         return ""
     lines = [
         "【你身上还在办的密令】",
-        "★ 皇帝问进度时调 `report_secret_order_progress(order_id, progress=本月新一步进展100字内)`：自动落档 + 返回历史时间线。一个月只能推一步。",
+        "★ 皇帝问进度时调 `report_secret_order_progress(order_id, progress=本月新一步进展100字内)`：自动落档 + 返回历史时间线。同月只能推一步。",
         "★ 皇帝催办/加急时调 `rush_secret_order(order_id, deadline_months=1/3/0, reason=催办缘由)`：1=下月核议，3=三月内核议，0=本月即核。",
         "★ 自认任务办到位时调 `submit_secret_order_for_review(order_id, claim=自述办结陈词200字内)`：转入待核议状态，等推演月末判 done/failed。",
         "★ progress / claim 写具体事实：派谁去、查到什么、摸到哪一层、下一步指向谁。空话「待实据到手」不算。",
@@ -125,7 +125,7 @@ def build_secret_order_brief(character: Character, context: CourtContext) -> str
             )
             tag = "✅ 本月已推进" if advanced else "⚠️ 本月尚未推进"
         due_turn = int(o.get("due_turn") or 0)
-        due_text = f"；御限剩 {max(0, due_turn - int(context.state.turn))} 月" if due_turn else ""
+        due_text = f"；御限剩 {max(0, due_turn - int(context.state.turn))} 日" if due_turn else ""
         lines.append(f"  - #{o['id']}「{o['title']}」 {tag}{due_text}")
         content_brief = (o.get("content") or "")[:80].replace("\n", " ")
         if content_brief:
@@ -319,8 +319,8 @@ def create_minister_agent(
             c.game_world_prompt,
             c.minister_agent_prompt,
             f"你当前扮演：{character_context_with_db(character, context.db)}。",
-            f"你与皇帝的多轮对话会持续到本{TURN_UNIT}退朝；同一{TURN_UNIT}复召时要接续此前奏对，不要重置记忆。",
-            f"进殿前，皇帝会先把本{TURN_UNIT}奏报、钱粮、地区、军队和派系态势作为一段 JSON 上下文喂给你；"
+            f"你与皇帝的多轮对话会持续到今日退朝；同日复召时要接续此前奏对，不要重置记忆。",
+            f"进殿前，皇帝会先把近日奏报、钱粮、地区、军队和派系态势作为一段 JSON 上下文喂给你；"
             "你只需简短回一句臣已知会，然后等皇帝问话。所有动态数据均可随时通过工具复查。",
         ]
         tools = build_minister_tools(character, context)
@@ -395,7 +395,7 @@ class MinisterRegistry:
         draft_line = self._build_draft_line()
         secret_brief = build_secret_order_brief(character, self.context)
         prompt = (
-            f"本{TURN_UNIT}朝会初始化上下文（钱粮、奏报、地区、军队、派系等，进殿前请知会，不需详细回奏）：\n"
+            f"今日朝会初始化上下文（钱粮、奏报、地区、军队、派系等，进殿前请知会，不需详细回奏）：\n"
             f"{self._court_brief}\n"
             f"当前诏书草稿（已核定、待颁诏）：{draft_line}。\n\n"
             f"{build_memory_brief(character, self.context)}\n\n"

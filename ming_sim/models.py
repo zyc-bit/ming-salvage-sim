@@ -189,6 +189,7 @@ class Power:
 class GameState:
     year: int = 1627
     period: int = 10
+    day: int = 1
     turn: int = 1
     turn_phase: str = "summoning"  # summoning | reviewing | issued —— 见 session.TurnPhase
     metrics: Dict[str, int] = field(
@@ -215,6 +216,16 @@ class GameState:
             self.period = 1
             self.year += 1
 
+    def next_day(self) -> None:
+        self.turn += 1
+        self.day += 1
+        if self.day > 30:
+            self.day = 1
+            self.period += 1
+            if self.period > 12:
+                self.period = 1
+                self.year += 1
+
 
 @dataclass
 class CourtContext:
@@ -225,6 +236,10 @@ class CourtContext:
 
 def period_label(year: int, month: int) -> str:
     return f"{year}年{month}月"
+
+
+def date_label(year: int, month: int, day: int) -> str:
+    return f"{year}年{month}月{day}日"
 
 
 def monthly_amount(amount: int) -> int:

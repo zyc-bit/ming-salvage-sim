@@ -211,8 +211,24 @@ type BudgetAccount = {
 
 type Budget = Record<"国库" | "内库", BudgetAccount>;
 
+type CourtEvent = {
+  id: number;
+  turn: number;
+  year: number;
+  period: number;
+  day: number;
+  source_kind: string;
+  source_id: string;
+  minister_name: string;
+  title: string;
+  narrative: string;
+  applied_summary: any;
+  status: string;
+  error: string;
+};
+
 type GameState = {
-  turn: { year: number; period: number; turn: number };
+  turn: { year: number; period: number; day: number; turn: number; phase?: string };
   metrics: Metrics;
   previous_summary: string;
   treasury: string;
@@ -232,6 +248,9 @@ type GameState = {
   consorts: Minister[];
   directives: Directive[];
   pending_count: number;
+  today_events: CourtEvent[];
+  court_events: CourtEvent[];
+  month_end_due: boolean;
   last_decree: string;
   last_report: string;
 };
@@ -289,6 +308,8 @@ type ChatResponse = {
   registered_minister?: string;
   proposed_directive?: ProposedDirective | null;
   secret_order_id?: number;
+  court_event?: CourtEvent | null;
+  state?: GameState;
 };
 
 type ApiErrorDetail = {
@@ -358,6 +379,7 @@ const streamChat = async (
   ministerName: string,
   message: string,
   onDelta: (delta: string) => void,
+  onImmediate?: (event: string, content: string) => void,
 ): Promise<ChatResponse> => {
   const response = await fetch(`/api/ministers/${encodeURIComponent(ministerName)}/chat/stream`, {
     method: "POST",
@@ -388,6 +410,8 @@ const streamChat = async (
       const payload = JSON.parse(parsed.data);
       if (parsed.event === "delta") {
         onDelta(String(payload.content || ""));
+      } else if (parsed.event.startsWith("immediate_")) {
+        onImmediate?.(parsed.event, String(payload.content || ""));
       } else if (parsed.event === "done") {
         return payload as ChatResponse;
       } else if (parsed.event === "error") {
@@ -541,6 +565,8 @@ function App() {
   const [suggestions, setSuggestions] = React.useState<Suggestion[]>([]);
   const [pendingUserMessage, setPendingUserMessage] = React.useState("");
   const [streamingMinisterMessage, setStreamingMinisterMessage] = React.useState("");
+  const [immediateStage, setImmediateStage] = React.useState("");
+  const [immediateNarrative, setImmediateNarrative] = React.useState("");
   const [chatNotice, setChatNotice] = React.useState("");
   const [composerHint, setComposerHint] = React.useState("");
   const [input, setInput] = React.useState("");
@@ -674,6 +700,8 @@ function App() {
       setSuggestions([]);
       setPendingUserMessage("");
       setStreamingMinisterMessage("");
+      setImmediateStage("");
+      setImmediateNarrative("");
       setChatNotice("");
       setComposerHint("");
       return;
@@ -682,6 +710,8 @@ function App() {
     setSuggestions([]);
     setPendingUserMessage("");
     setStreamingMinisterMessage("");
+    setImmediateStage("");
+    setImmediateNarrative("");
     setComposerHint("");
     loadMinisterChat(selectedMinister).catch((err) => setError(err.message));
   }, [selectedMinister, loadMinisterChat]);
@@ -755,6 +785,8 @@ function App() {
     setChatNotice("");
     setPendingUserMessage("");
     setStreamingMinisterMessage("");
+    setImmediateStage("");
+    setImmediateNarrative("");
     loadMinisterChat(minister.name).catch((err) => setError(err.message));
   };
 
@@ -775,6 +807,8 @@ function App() {
     const fromComposer = text === input;
     setPendingUserMessage(message);
     setStreamingMinisterMessage("");
+    setImmediateStage("");
+    setImmediateNarrative("");
     setBusy("大臣思索中");
     setError("");
     setComposerHint("");
@@ -785,6 +819,16 @@ function App() {
     try {
       const data = await streamChat(activeMinister.name, message, (delta) => {
         setStreamingMinisterMessage((current) => current + delta);
+      }, (event, content) => {
+        if (event === "immediate_stage") {
+          setImmediateStage(content);
+          setBusy("即时回奏中");
+        } else if (event === "immediate_text") {
+          setImmediateNarrative((current) => current + content);
+        } else if (event === "immediate_error") {
+          setImmediateStage("即时回奏失败");
+          setImmediateNarrative((current) => current + (content ? `\n${content}` : ""));
+        }
       });
       setPendingUserMessage("");
       setStreamingMinisterMessage("");
@@ -799,6 +843,9 @@ function App() {
       if (data.secret_order_id) {
         setChatNotice(`密令已秘密交付${activeMinister.name}，编号 #${data.secret_order_id}。`);
       }
+      if (data.court_event?.status === "applied") {
+        setChatNotice((prev) => prev || "即时回奏已落入盘面。");
+      }
       if (data.proposed_directive) {
         setChatNotice(`${activeMinister.name}已拟旨一道，待陛下在「诏书草案」核定（准/驳）。`);
       }
@@ -806,6 +853,8 @@ function App() {
         setChat([]);
         setSuggestions([]);
         setStreamingMinisterMessage("");
+        setImmediateStage("");
+        setImmediateNarrative("");
         setSelectedMinister(data.next_minister);
         setActiveModal("chat");
         setChatNotice(`已传${data.next_minister}入殿。`);
@@ -946,7 +995,7 @@ function App() {
   };
 
   const issueDecree = async () => {
-    setBusy("月末结算");
+    setBusy("颁诏即时回奏");
     setSettleStage("");
     setSettleThinking("");
     setSettleNarrative("");
@@ -961,6 +1010,7 @@ function App() {
       let buffer = "";
       let done = false;
       let failed = "";
+      let donePayload: any = null;
       while (!done) {
         const { value, done: streamDone } = await reader.read();
         if (streamDone) break;
@@ -978,16 +1028,17 @@ function App() {
           if (!evName || !dataRaw) continue;
           let data: { content?: string; message?: string } = {};
           try { data = JSON.parse(dataRaw); } catch { continue; }
-          if (evName === "stage") {
+          if (evName === "stage" || evName === "immediate_stage") {
             setSettleStage(data.content || "");
-          } else if (evName === "thinking") {
+          } else if (evName === "thinking" || evName === "immediate_thinking") {
             setSettleThinking((prev) => prev + (data.content || ""));
-          } else if (evName === "text") {
+          } else if (evName === "text" || evName === "immediate_text") {
             setSettleNarrative((prev) => prev + (data.content || ""));
-          } else if (evName === "error") {
+          } else if (evName === "error" || evName === "immediate_error") {
             failed = data.message || "颁诏失败。";
             done = true;
           } else if (evName === "done") {
+            donePayload = data;
             done = true;
           }
         }
@@ -997,16 +1048,90 @@ function App() {
         setBusy("");
         return;
       }
-      // 结算完成：强制整页刷新，草案/对话/局势/closed 弹窗全部按新 state 重新初始化
-      window.location.reload();
-      return;
+      if (donePayload?.state) {
+        setState(donePayload.state);
+        setDecree(donePayload.decree || decree);
+        setReport(donePayload.report || "");
+      } else {
+        await loadState();
+      }
+      setBusy("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy("");
     }
   };
 
-  const settling = busy === "月末结算";
+  const endDay = async () => {
+    if (busy) return;
+    setBusy(state.month_end_due ? "月终退朝" : "退朝至明日");
+    setSettleStage("");
+    setSettleThinking("");
+    setSettleNarrative("");
+    setError("");
+    try {
+      const response = await fetch("/api/day/end/stream", { method: "POST" });
+      if (!response.ok || !response.body) {
+        throw new Error(`退朝失败：HTTP ${response.status}`);
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let done = false;
+      let failed = "";
+      let donePayload: any = null;
+      while (!done) {
+        const { value, done: streamDone } = await reader.read();
+        if (streamDone) break;
+        buffer += decoder.decode(value, { stream: true });
+        const blocks = buffer.split("\n\n");
+        buffer = blocks.pop() || "";
+        for (const block of blocks) {
+          let evName = "";
+          let dataRaw = "";
+          for (const line of block.split("\n")) {
+            if (line.startsWith("event: ")) evName = line.slice(7).trim();
+            else if (line.startsWith("data: ")) dataRaw += line.slice(6);
+          }
+          if (!evName || !dataRaw) continue;
+          let data: { content?: string; message?: string; state?: GameState; report?: string } = {};
+          try { data = JSON.parse(dataRaw); } catch { continue; }
+          if (evName === "stage") {
+            setSettleStage(data.content || "");
+          } else if (evName === "thinking") {
+            setSettleThinking((prev) => prev + (data.content || ""));
+          } else if (evName === "text") {
+            setSettleNarrative((prev) => prev + (data.content || ""));
+          } else if (evName === "error") {
+            failed = data.message || "退朝失败。";
+            done = true;
+          } else if (evName === "done") {
+            donePayload = data;
+            done = true;
+          }
+        }
+      }
+      if (failed) {
+        setError(failed);
+        setBusy("");
+        return;
+      }
+      if (donePayload?.state) {
+        setState(donePayload.state);
+        setReport(donePayload.report || "");
+        if (donePayload.report) setGazetteReport(donePayload.report);
+      } else {
+        await loadState();
+      }
+      setActiveModal("none");
+      setBusy("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setBusy("");
+    }
+  };
+
+  const settling = busy === "月终退朝" || busy === "颁诏即时回奏";
   const guardClose = (fn: () => void) => () => {
     if (settling) return;
     fn();
@@ -1031,6 +1156,8 @@ function App() {
         onOpenExtraction={() => setActiveModal("extraction")}
         onOpenHistory={() => setActiveModal("history")}
         onOpenSecretOrders={() => setActiveModal("secret_orders")}
+        onEndDay={() => endDay()}
+        monthEndDue={state.month_end_due}
       />
 
       <CourtDrawer
@@ -1067,7 +1194,7 @@ function App() {
       ) : null}
 
       {activeModal === "state" ? (
-        <FullscreenModal title="国势与奏报" subtitle={`${state.turn.year} 年 ${state.turn.period} 月`} bgClass="modal-bg-state" onClose={guardClose(() => setActiveModal("none"))}>
+        <FullscreenModal title="国势与奏报" subtitle={`${state.turn.year} 年 ${state.turn.period} 月 ${state.turn.day} 日`} bgClass="modal-bg-state" onClose={guardClose(() => setActiveModal("none"))}>
           <StateModal state={state} />
         </FullscreenModal>
       ) : null}
@@ -1081,6 +1208,8 @@ function App() {
             suggestions={suggestions}
             pendingUserMessage={pendingUserMessage}
             streamingMinisterMessage={streamingMinisterMessage}
+            immediateStage={immediateStage}
+            immediateNarrative={immediateNarrative}
             chatNotice={chatNotice}
             composerHint={composerHint}
             input={input}
@@ -1098,7 +1227,7 @@ function App() {
       ) : null}
 
       {activeModal === "edict" ? (
-        <FullscreenModal title="诏书草案" subtitle="本月指令、拟诏与颁布" bgClass="modal-bg-edict" onClose={guardClose(() => setActiveModal("none"))}>
+        <FullscreenModal title="诏书草案" subtitle="本日指令、拟诏与颁布" bgClass="modal-bg-edict" onClose={guardClose(() => setActiveModal("none"))}>
           <EdictModal
             state={state}
             directiveText={directiveText}
@@ -1166,6 +1295,8 @@ function App() {
 
       {settling ? (
         <SettlementLock
+          title={busy === "颁诏即时回奏" ? "即时回奏中" : "月终退朝中"}
+          narrativeLabel={busy === "颁诏即时回奏" ? "即时奏疏" : "月末奏章"}
           stage={settleStage}
           thinking={settleThinking}
           narrative={settleNarrative}
@@ -1176,10 +1307,14 @@ function App() {
 }
 
 function SettlementLock({
+  title,
+  narrativeLabel,
   stage,
   thinking,
   narrative,
 }: {
+  title: string;
+  narrativeLabel: string;
   stage: string;
   thinking: string;
   narrative: string;
@@ -1202,10 +1337,10 @@ function SettlementLock({
     if (narrRef.current) narrRef.current.scrollTop = narrRef.current.scrollHeight;
   }, [narrative]);
   return (
-    <div className="settlement-lock" role="alertdialog" aria-modal="true" aria-label="月末结算">
+    <div className="settlement-lock" role="alertdialog" aria-modal="true" aria-label={title}>
       <div className="settlement-lock-card">
         <Loader2 className="settlement-spin" size={28} />
-        <h2>月末结算中</h2>
+        <h2>{title}</h2>
         <p>{stage === "数值推演结算" ? "档房核账中，钱粮、地方、军务落账，请稍候。" : stage ? `当前：${stage}` : "朝廷推演钱粮、地方、军务，请勿操作。"}</p>
         {thinking && (
           <div className="settlement-stream-block">
@@ -1217,7 +1352,7 @@ function SettlementLock({
         )}
         {narrative && (
           <div className="settlement-stream-block">
-            <div className="settlement-stream-label">月末奏章</div>
+            <div className="settlement-stream-label">{narrativeLabel}</div>
             <div className="settlement-stream-text settlement-narrative" ref={narrRef}>
               {narrative}
             </div>
@@ -1742,7 +1877,7 @@ function TopStatusBar({
     <header className="status-bar" aria-label="国势状态栏">
       <button className="status-emblem" onClick={onOpenState}>
         <img src="/icon_ming_emblem.png" alt="大明" className="emblem-art" />
-        <span>{state.turn.year} 年 {state.turn.period} 月</span>
+        <span>{state.turn.year} 年 {state.turn.period} 月 {state.turn.day} 日</span>
       </button>
       <div className="status-metrics">
         <BudgetHover accountName="国库" budget={state.budget["国库"]} />
@@ -1858,20 +1993,24 @@ function BottomCommandBar({
   eventsCount,
   directivesCount,
   secretOrdersCount,
+  monthEndDue,
   onOpenMemorials,
   onOpenEdict,
   onOpenExtraction,
   onOpenHistory,
   onOpenSecretOrders,
+  onEndDay,
 }: {
   eventsCount: number;
   directivesCount: number;
   secretOrdersCount: number;
+  monthEndDue: boolean;
   onOpenMemorials: () => void;
   onOpenEdict: () => void;
   onOpenExtraction: () => void;
   onOpenHistory: () => void;
   onOpenSecretOrders: () => void;
+  onEndDay: () => void;
 }) {
   return (
     <nav className="bottom-command-bar" aria-label="朝政主操作">
@@ -1887,7 +2026,7 @@ function BottomCommandBar({
       <button className="command-icon" onClick={onOpenEdict} aria-label={`诏书草案 ${directivesCount} 道待发`}>
         <img src="/icon_scroll.png" alt="" className="command-art" />
         {directivesCount ? <span className="command-badge">{directivesCount}</span> : null}
-        <span className="command-caption"><b>诏书草案</b><small>{directivesCount ? `${directivesCount} 道待发` : "本月未下旨"}</small></span>
+        <span className="command-caption"><b>诏书草案</b><small>{directivesCount ? `${directivesCount} 道待发` : "今日未下旨"}</small></span>
       </button>
       <button className="command-icon" onClick={onOpenSecretOrders} aria-label={`密令 ${secretOrdersCount} 条进行中`}>
         <img src="/bg_edict.png" alt="" className="command-art command-art-secret" />
@@ -1897,6 +2036,10 @@ function BottomCommandBar({
       <button className="command-icon" onClick={onOpenHistory} aria-label="历代奏报">
         <img src="/icon_scroll.png" alt="" className="command-art" />
         <span className="command-caption"><b>史册</b><small>历代奏报/诏书</small></span>
+      </button>
+      <button className="command-icon" onClick={onEndDay} aria-label={monthEndDue ? "月终退朝" : "退朝至明日"}>
+        <img src="/icon_seal.png" alt="" className="command-art" />
+        <span className="command-caption"><b>{monthEndDue ? "月终退朝" : "退朝"}</b><small>{monthEndDue ? "月终结算" : "至明日"}</small></span>
       </button>
     </nav>
   );
@@ -1951,7 +2094,7 @@ type ExtractionData = {
 
 function ReportModal({ report, onClose }: { report: string; onClose: () => void }) {
   return (
-    <FullscreenModal title="月末奏疏" subtitle="推演结果" bgClass="modal-bg-state" onClose={onClose}>
+    <FullscreenModal title="奏疏" subtitle="推演结果" bgClass="modal-bg-state" onClose={onClose}>
       <article className="state-document modal-scroll">
         <div className="document-section">
           <pre className="memorial-text">{report}</pre>
@@ -2017,7 +2160,7 @@ function SecretOrdersModal({
                 <span className="so-title"><Lock size={13} />{o.title}</span>
                 <span className={`so-status ${statusCls[o.status] || ""}`}>{statusLabel[o.status] || o.status}</span>
               </div>
-              <div className="so-meta">第 {o.year_issued} 年 {o.period_issued} 月下令 · 承办：{o.minister_name}</div>
+              <div className="so-meta">{o.year_issued} 年 {o.period_issued} 月下令 · 承办：{o.minister_name}</div>
               <div className="so-open-hint">点击查看密令详情</div>
               {o.status === "active" && (
                 <button
@@ -2067,12 +2210,12 @@ function SecretOrderDetailDialog({
   onOpenMinister: (name: string) => void;
 }) {
   const deadlineText = order.due_turn
-    ? `第 ${order.due_turn} 回合核议${order.due_turn <= order.turn_issued ? "" : `（限 ${order.due_turn - order.turn_issued} 个月）`}`
+    ? `第 ${order.due_turn} 日序核议${order.due_turn <= order.turn_issued ? "" : `（限 ${order.due_turn - order.turn_issued} 日）`}`
     : "无硬期限";
   const detailRows = [
     ["编号", `#${order.id}`],
     ["承办", order.minister_name],
-    ["下令", `第 ${order.year_issued} 年 ${order.period_issued} 月 · 回合 ${order.turn_issued}`],
+    ["下令", `${order.year_issued} 年 ${order.period_issued} 月 · 日序 ${order.turn_issued}`],
     ["期限", deadlineText],
     ["重要", String(order.importance || 0)],
     ["标签", order.tags?.length ? order.tags.join("、") : "无"],
@@ -3366,6 +3509,8 @@ function ChatModal({
   suggestions,
   pendingUserMessage,
   streamingMinisterMessage,
+  immediateStage,
+  immediateNarrative,
   chatNotice,
   composerHint,
   input,
@@ -3385,6 +3530,8 @@ function ChatModal({
   suggestions: Suggestion[];
   pendingUserMessage: string;
   streamingMinisterMessage: string;
+  immediateStage: string;
+  immediateNarrative: string;
   chatNotice: string;
   composerHint: string;
   input: string;
@@ -3425,7 +3572,7 @@ function ChatModal({
     if (node) {
       node.scrollTop = node.scrollHeight;
     }
-  }, [minister.name, chat, pendingUserMessage, streamingMinisterMessage, chatNotice, busy, error]);
+  }, [minister.name, chat, pendingUserMessage, streamingMinisterMessage, immediateStage, immediateNarrative, chatNotice, busy, error]);
 
   const handleSend = () => {
     onSend(input);
@@ -3478,7 +3625,7 @@ function ChatModal({
             {secretOrders.map((o) => (
               <div key={o.id} className="secret-order-item">
                 <div className="secret-order-title">{o.title}</div>
-                <div className="secret-order-meta">第 {o.year_issued} 年 {o.period_issued} 月下令</div>
+                <div className="secret-order-meta">{o.year_issued} 年 {o.period_issued} 月下令</div>
                 {o.content && <div className="secret-order-content">{o.content}</div>}
                 {o.sim_note && <div className="secret-order-content"><b>月度动向：</b>{o.sim_note}</div>}
                 {o.result && <div className="secret-order-content"><b>承办回报：</b>{o.result}</div>}
@@ -3500,6 +3647,12 @@ function ChatModal({
             <div className="chat-message minister thinking">
               <span>{minister.name}</span>
               <p><Loader2 size={14} />大臣思索中...</p>
+            </div>
+          )}
+          {(immediateStage || immediateNarrative) && (
+            <div className="chat-immediate-feedback">
+              <b>{immediateStage || "即时回奏"}</b>
+              {immediateNarrative ? <pre>{immediateNarrative}</pre> : <span><Loader2 size={13} />推演中...</span>}
             </div>
           )}
           {chatNotice && <div className="chat-system-note">{chatNotice}</div>}
@@ -3596,7 +3749,7 @@ function EdictModal({
   return (
     <div className="edict-full-grid">
       <section className="modal-pane directive-pane">
-        <h2>本月指令</h2>
+        <h2>本日指令</h2>
         {hasPending && (
           <div className="pending-directives" role="region" aria-label="待核定大臣拟旨">
             <h3>⚠ 大臣拟旨待核定（{pendingDirectives.length}）</h3>
@@ -3643,7 +3796,7 @@ function EdictModal({
               )}
             </div>
           ))}
-          {!draftDirectives.length && !hasPending && <div className="empty-note">本月不可空过。请先召见大臣，或在右侧新增一道指令。</div>}
+          {!draftDirectives.length && !hasPending && <div className="empty-note">今日尚无待颁诏书。可先召见大臣，或在右侧新增一道指令。</div>}
         </div>
       </section>
 
@@ -3657,7 +3810,7 @@ function EdictModal({
         <div className="edict-actions">
           <button onClick={onCreateDirective} disabled={!!busy || !directiveText.trim()}>新增草案</button>
           <button onClick={onWriteDecree} disabled={!!busy || !draftDirectives.length || hasPending}>生成诏书</button>
-          <button className="primary-action" onClick={onIssueDecree} disabled={!!busy || !draftDirectives.length || hasPending}>颁布诏书</button>
+          <button className="primary-action" onClick={onIssueDecree} disabled={!!busy || !draftDirectives.length || hasPending}>颁诏回奏</button>
         </div>
         {hasPending && <small className="pending-hint">尚有 {pendingDirectives.length} 道大臣拟旨待核定（准/驳），核定后方可颁诏。</small>}
       </section>
@@ -3669,7 +3822,7 @@ function EdictModal({
         {decree || report ? (
           <pre>{`${decree || ""}${report ? `\n\n${report}` : ""}`}</pre>
         ) : (
-          <div className="empty-note">生成诏书后，正式诏文会在此显示；颁布后会显示月末总结奏章。</div>
+          <div className="empty-note">生成诏书后，正式诏文会在此显示；颁布后会显示即时回奏。</div>
         )}
       </section>
     </div>
