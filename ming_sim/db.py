@@ -16,8 +16,8 @@ from ming_sim.constants import (
     ARMY_FIELD_ALIASES, ARMY_FIELD_LABELS, ARMY_QUANTITY_FIELDS, ARMY_SCORE_FIELDS, ARMY_TEXT_FIELDS,
     BUILDING_CATEGORIES, BUILDING_FIELD_LABELS, BUILDING_OUTPUT_METRICS,
     BUILDING_QUANTITY_FIELDS, BUILDING_SCORE_FIELDS, BUILDING_TEXT_FIELDS,
-    ECONOMY_ACCOUNTS, POWER_FIELD_LABELS, POWER_SCORE_FIELDS,
-    POWER_FIELD_ALIASES, POWER_TEXT_FIELDS, MONEY_UNIT, REGION_FIELD_LABELS, REGION_QUANTITY_FIELDS,
+    ECONOMY_ACCOUNTS, POWER_FIELD_LABELS,
+    POWER_FIELD_ALIASES, MONEY_UNIT, REGION_FIELD_LABELS, REGION_QUANTITY_FIELDS,
     FISCAL_SCORE_FIELDS, REGION_FIELD_ALIASES, REGION_SCORE_FIELDS, REGION_TEXT_FIELDS, TURN_UNIT,
 )
 from ming_sim.content import GameContent
@@ -1082,11 +1082,11 @@ class GameDB:
             (ARREARS_UNIT_VERSION,),
         )
 
-    def backfill_character_locations(self) -> List[Dict[str, object]]:
+    def backfill_character_locations(self) -> None:
         """Fill missing character locations with existing region_id values."""
         valid_regions = {str(r["id"]) for r in self.conn.execute("SELECT id FROM regions").fetchall()}
         if not valid_regions:
-            return []
+            return
         rows = self.conn.execute(
             """
             SELECT name, office, office_type, status, power_id, location
@@ -1094,28 +1094,18 @@ class GameDB:
             WHERE COALESCE(location, '') = ''
             """
         ).fetchall()
-        applied: List[Dict[str, object]] = []
         for row in rows:
-            location, defaulted, reason = infer_character_location(
+            location, _defaulted, _reason = infer_character_location(
                 str(row["office"] or ""), str(row["office_type"] or ""), str(row["status"] or "")
             )
             if location not in valid_regions:
                 location = COURT_LOCATION
-                defaulted = True
-                reason = "推断地点不在地区表，默认回京师"
             self.conn.execute(
                 "UPDATE characters SET location=? WHERE name=?",
                 (location, row["name"]),
             )
             if str(row["name"]) in self.content.characters:
                 self.content.characters[str(row["name"])].location = location
-            applied.append({
-                "name": row["name"],
-                "location": location,
-                "defaulted": defaulted,
-                "reason": reason,
-            })
-        return applied
 
     def has_state(self) -> bool:
         row = self.conn.execute("SELECT 1 FROM game_state WHERE id = 1").fetchone()
@@ -1797,14 +1787,6 @@ class GameDB:
         budget = self.treasury_budget_summary()
         return f"{budget}账面：{account_text}。本{TURN_UNIT}收支：{period_text}。近账：{recent_text}。"
 
-    def faction_satisfaction(self, faction: str) -> int:
-        row = self.conn.execute("SELECT satisfaction FROM factions WHERE name = ?", (faction,)).fetchone()
-        return int(row["satisfaction"]) if row else 50
-
-    def faction_leverage(self, faction: str) -> int:
-        row = self.conn.execute("SELECT leverage FROM factions WHERE name = ?", (faction,)).fetchone()
-        return int(row["leverage"]) if row else 50
-
     def faction_report(self) -> str:
         rows = self.conn.execute(
             "SELECT name, satisfaction, leverage, agenda FROM factions ORDER BY name"
@@ -2446,11 +2428,7 @@ class GameDB:
         for row in rows:
             maint = int(row["maintenance_per_turn"]) or 0
             arr = int(row["arrears"]) or 0
-            if maint > 0 and arr > 0:
-                months = arr / maint
-                arr_text = f"欠饷{arr}万两（约{months:.1f}月军饷）"
-            else:
-                arr_text = f"欠饷{arr}万两"
+            arr_text = self._format_arrears(maint, arr)
             parts.append(
                 f"{row['name']}：驻{row['station']}，兵{row['manpower']}，"
                 f"饷{format_money(monthly_amount(maint))} /{TURN_UNIT}，补给{row['supply']}、"
@@ -2461,6 +2439,13 @@ class GameDB:
             f"建档兵力合计{int(total_manpower['total'] or 0)}人，账面{TURN_UNIT}维护费{format_money(monthly_amount(int(total_maintenance['total'] or 0)))}。"
         )
 
+    @staticmethod
+    def _format_arrears(maint: int, arr: int) -> str:
+        """欠饷文案：有维护费时附'约N月军饷'。army_report / army_detail 共用。"""
+        if maint > 0 and arr > 0:
+            return f"欠饷{arr}万两（约{arr / maint:.1f}月军饷）"
+        return f"欠饷{arr}万两"
+
     def army_detail(self, raw_name: str) -> str:
         army_id = match_army_id_from_text(raw_name, self.content.armies)
         if army_id is None:
@@ -2470,11 +2455,7 @@ class GameDB:
             raise ValueError(f"军队未入库：{raw_name}")
         maint = int(row["maintenance_per_turn"]) or 0
         arr = int(row["arrears"]) or 0
-        if maint > 0 and arr > 0:
-            months = arr / maint
-            arr_text = f"欠饷{arr}万两（约{months:.1f}月军饷）"
-        else:
-            arr_text = f"欠饷{arr}万两"
+        arr_text = self._format_arrears(maint, arr)
         return (
             f"{row['name']}：驻扎地{row['station']}，统帅{row['commander']}，"
             f"兵种{row['troop_type']}，人数{row['manpower']}人，"
@@ -2633,10 +2614,8 @@ class GameDB:
         for raw in new_armies:
             if not isinstance(raw, dict):
                 continue
-            item = {POWER_FIELD_ALIASES.get(k, k) if False else k: v for k, v in raw.items()}
             # 规范键：复用 ARMY_FIELD_ALIASES（兼容中文）
-            from ming_sim.constants import ARMY_FIELD_ALIASES as _AA
-            item = {_AA.get(str(k).strip(), str(k).strip()): v for k, v in raw.items()}
+            item = {ARMY_FIELD_ALIASES.get(str(k).strip(), str(k).strip()): v for k, v in raw.items()}
             aid = str(item.get("id") or "").strip()
             if not aid:
                 print(f"[WARN] new_armies 缺 id → 跳过: {raw}")
@@ -3964,30 +3943,6 @@ class GameDB:
         )
         self.conn.commit()
 
-    def update_directive(
-        self,
-        directive_id: int,
-        event: Event,
-        actor: str,
-        skill_id: str,
-        text: str,
-        notes: str,
-    ) -> None:
-        self.conn.execute(
-            """
-            UPDATE turn_directives
-            SET event_id = ?,
-                actor = ?,
-                skill_id = ?,
-                text = ?,
-                notes = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (event.id, actor, skill_id, text, notes, directive_id),
-        )
-        self.conn.commit()
-
     def delete_directive(self, directive_id: int) -> None:
         self.conn.execute(
             """
@@ -4345,12 +4300,6 @@ class GameDB:
         row = self.conn.execute("SELECT location FROM characters WHERE name=?", (name,)).fetchone()
         return str(row["location"] or "") if row else ""
 
-    def set_character_location(self, name: str, location: str) -> None:
-        self.conn.execute("UPDATE characters SET location=? WHERE name=?", (location, name))
-        self.conn.commit()
-        if name in self.content.characters:
-            self.content.characters[name].location = location
-
     def communication_profile(self, origin_location: str, destination_location: str) -> Dict[str, int]:
         return {
             "letter_days": communication_days(origin_location, destination_location, "letter"),
@@ -4705,8 +4654,7 @@ class GameDB:
         lines.append(f"{stamp}{note.strip()}")
         # 按〔年月日〕戳排序，保证时间线顺序（同日替换后不致错位）
         def _stamp_key(ln: str):
-            import re as _re
-            m = _re.match(r"〔(\d+)年(\d+)月(?:(\d+)日)?〕", ln)
+            m = re.match(r"〔(\d+)年(\d+)月(?:(\d+)日)?〕", ln)
             return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)) if m else (0, 0, 0)
         lines.sort(key=_stamp_key)
         self.conn.execute(
@@ -4862,43 +4810,6 @@ class GameDB:
             self.conn.commit()
             tlog(f"[secret_order] auto_submit_due count={len(submitted)} ids={[x['id'] for x in submitted]}")
         return submitted
-
-    def get_secret_orders_by_keywords(
-        self, keywords: List[str], limit: int = 5, current_turn: int = 0
-    ) -> List[Dict[str, object]]:
-        """检索进行中（active）密令，tags LIKE 匹配，供推演 secret_orders 字段注入。
-        完结/失败密令靠 event_memory（chat_message 来源）进入 relevant_memories，不在此返回。"""
-        if not keywords:
-            return self.list_secret_orders(status="active")[:limit]
-        like_clauses = " OR ".join(["tags LIKE ?" for _ in keywords])
-        like_params = [f"%{k}%" for k in keywords]
-        rows = self.conn.execute(
-            f"""
-            SELECT * FROM secret_orders
-            WHERE status = 'active' AND ({like_clauses})
-            ORDER BY importance DESC, id DESC
-            LIMIT ?
-            """,
-            like_params + [limit],
-        ).fetchall()
-        if not rows:
-            return self.list_secret_orders(status="active")[:limit]
-        return [
-            {
-                "id": int(r["id"]),
-                "turn_issued": int(r["turn_issued"]),
-                "year_issued": int(r["year_issued"]),
-                "period_issued": int(r["period_issued"]),
-                "minister_name": r["minister_name"],
-                "title": r["title"],
-                "content": r["content"],
-                "tags": json.loads(r["tags"] or "[]") if isinstance(r["tags"], str) else (r["tags"] or []),
-                "importance": int(r["importance"]),
-                "status": r["status"],
-                "result": r["result"] or "",
-            }
-            for r in rows
-        ]
 
     # ----- chat_messages 补充查询 -----
 

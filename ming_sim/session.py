@@ -740,22 +740,6 @@ class GameSession:
         print(f"[secret_order] 截获密令 minister={minister_name} assignee={assignee} title={title!r} tags={tags}")
         return self.db.create_secret_order(self.state, assignee, title, content, tags, deadline_months=deadline)
 
-    def _apply_close_secret_order(self, payload: str) -> None:
-        """report_secret_order_result 哨兵落库。"""
-        import json as _json
-        try:
-            data = _json.loads(payload) if payload else {}
-        except (ValueError, TypeError):
-            return
-        if not isinstance(data, dict):
-            return
-        order_id = int(data.get("order_id") or 0)
-        status = str(data.get("status") or "")
-        result = str(data.get("result") or "")
-        if order_id and status in {"done", "failed"}:
-            print(f"[secret_order] 结案 id={order_id} status={status} result={result!r}")
-            self.db.close_secret_order(order_id, status, result, self.state.turn)
-
     # ── 拟旨 / 草案阶段 ───────────────────────────────────────────────────
 
     def list_directives(self, include_pending: bool = True) -> List[DirectiveView]:

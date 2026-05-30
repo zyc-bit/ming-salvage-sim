@@ -5,12 +5,8 @@ L1：仅依赖 ming_sim.paths（L0）做 frozen-aware 路径解析。
 
 from __future__ import annotations
 
-import os
+from ming_sim.paths import bundled_path
 
-from ming_sim.paths import bundled_path, bundled_root
-
-# 只读资源根：源码=仓库根，frozen=_MEIPASS。
-ROOT_DIR = str(bundled_root())
 CONTENT_DIR = bundled_path("content")
 WRAP = 88
 MONEY_UNIT = "万两"
@@ -50,22 +46,6 @@ BUILDING_FIELD_LABELS = {
     "output_metric": "产出去向",
     "output_amount": "产出量",
     "status": "状态",
-}
-BUILDING_FIELD_ALIASES = {
-    **{field: field for field in BUILDING_SCORE_FIELDS + BUILDING_QUANTITY_FIELDS + BUILDING_TEXT_FIELDS},
-    "名称": "name",
-    "等级": "level",
-    "规模": "level",
-    "完好": "condition",
-    "维护费": "maintenance",
-    "维护": "maintenance",
-    "风险": "risk",
-    "产出去向": "output_metric",
-    "产出量": "output_amount",
-    "产出": "output_amount",
-    "状态": "status",
-    "原因": "reason",
-    "reason": "reason",
 }
 POWER_SCORE_FIELDS = ("leverage", "satisfaction", "military_strength", "cohesion", "supply")
 POWER_TEXT_FIELDS = ("leader", "stance", "agenda", "status", "last_action")
@@ -206,7 +186,6 @@ ARMY_FIELD_ALIASES = {
 }
 EXIT_COMMANDS = {"exit", "退出游戏", "退出", "exit game"}
 COURT_BREAK_COMMANDS = {"q", "quit", "退朝", "下朝"}
-MINISTER_DISMISS_COMMANDS = {"done", "退下", "跪安", "退了", "下去"}
 
 # 经济流水（economy_ledger）支出条目的结构化标签。
 # 仅对支出（delta<0）有效；收入条目（税收/抄家入帑/纳贡）三项一律 NULL。

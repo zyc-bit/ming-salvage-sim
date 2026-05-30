@@ -67,9 +67,8 @@ h2,
 h3,
 .modal-title h1,
 .drawer-brand strong,
-.document-hero h2,
 .command-caption b,
-.status-emblem span {
+.status-emblem span{
   font-family: var(--font-brush);
   letter-spacing: 0.04em;
 }
@@ -185,34 +184,6 @@ select:focus-visible {
     linear-gradient(90deg, rgba(20, 15, 9, 0.34), transparent 18%, transparent 72%, rgba(20, 15, 9, 0.28)),
     linear-gradient(0deg, rgba(64, 42, 21, 0.22), transparent 20%, transparent 78%, rgba(255, 239, 181, 0.24));
   pointer-events: none;
-}
-
-.grand-map > svg {
-  position: absolute;
-  inset: 7% 6% 8% 5%;
-  width: 90%;
-  height: 86%;
-  filter:
-    drop-shadow(0 32px 42px rgba(0, 0, 0, 0.58))
-    drop-shadow(0 0 0 rgba(255, 220, 134, 0.18));
-}
-
-.map-land {
-  fill: url("#terrain");
-  stroke: rgba(29, 24, 16, 0.78);
-  stroke-width: 0.72;
-}
-
-.map-river {
-  fill: none;
-  stroke: rgba(62, 115, 133, 0.55);
-  stroke-width: 0.7;
-  stroke-linecap: round;
-}
-
-.map-river.thin {
-  stroke-width: 0.36;
-  opacity: 0.78;
 }
 
 .map-node {
@@ -635,7 +606,6 @@ select:focus-visible {
   font-size: 0.7rem;
 }
 
-
 .overlay-panel,
 .modal-pane {
   border: 1px solid rgba(226, 180, 86, 0.28);
@@ -826,16 +796,6 @@ select:focus-visible {
   height: 20vh;
 }
 
-.court-empty-note {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  color: rgba(255,220,140,0.7);
-  text-shadow: 0 1px 4px rgba(0,0,0,0.8);
-  font-size: 1rem;
-}
-
 .minister-card {
   position: relative;
   display: flex;
@@ -1005,40 +965,6 @@ select:focus-visible {
   color: var(--gold);
 }
 
-.drawer-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 9px;
-  padding-top: 12px;
-  color: var(--muted);
-}
-
-.drawer-legend span {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.legend-dot {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-}
-
-.legend-dot.province {
-  background: #879f7b;
-}
-
-.legend-dot.theater {
-  background: #b75a46;
-}
-
-.legend-dot.danger {
-  background: #cf4d3a;
-}
-
 .map-intel-panel {
   position: fixed;
   right: auto;
@@ -1114,69 +1040,18 @@ select:focus-visible {
   pointer-events: none;
 }
 
-.intel-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.info-cell {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-  min-height: 58px;
-  padding: 12px;
-  border: 1px solid rgba(111, 83, 46, 0.15);
-  border-radius: 6px;
-  background: rgba(255, 250, 235, 0.48);
-}
-
-.map-intel-panel .info-cell span {
-  color: #000;
-  font-size: 0.75rem;
-}
-
-.map-intel-panel .info-cell b {
-  color: #000;
-  font-size: 0.95rem;
-}
-
-.map-intel-panel .info-cell.good b {
-  color: #000;
-}
-
-.map-intel-panel .info-cell.warn b {
-  color: #000;
-}
-
-.map-intel-panel .info-cell.danger b {
-  color: #000;
-}
-
-.intel-copy,
 .profile-copy,
-.event-card p,
 .directive-item p,
-.long-copy,
-.report-grid p {
+.long-copy{
   margin: 0;
   color: #6b5d46;
   white-space: pre-wrap;
 }
 
-.intel-copy {
-  margin-top: 18px;
-  line-height: 1.75;
-}
-
 .map-intel-panel .panel-title,
-.map-intel-panel .intel-copy,
 .map-intel-panel .garrison-title,
-.map-intel-panel .army-card b,
-.map-intel-panel .army-card span,
-.map-intel-panel .army-stats small,
 .map-intel-panel .empty-note,
-.map-intel-panel svg {
+.map-intel-panel svg{
   color: #000;
 }
 
@@ -1187,56 +1062,11 @@ select:focus-visible {
   font-weight: 700;
 }
 
-.map-intel-panel .info-cell,
-.map-intel-panel .army-card,
-.map-intel-panel .army-stats small {
-  overflow-wrap: anywhere;
-}
-
 .garrison-title {
   margin: 10px 0 4px;
   color: #3a2410;
   font-weight: 700;
   font-size: 0.88rem;
-}
-
-.army-list {
-  display: grid;
-  gap: 12px;
-}
-
-.army-card {
-  display: grid;
-  gap: 5px;
-  min-width: 0;
-  padding: 14px;
-  border: 1px solid rgba(111, 83, 46, 0.16);
-  border-radius: 6px;
-  background: rgba(255, 250, 235, 0.48);
-}
-
-.army-card b {
-  color: var(--paper);
-}
-
-.army-card span {
-  color: var(--muted);
-  font-size: 0.8rem;
-}
-
-.army-stats {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  min-width: 0;
-}
-
-.army-stats small {
-  min-width: 0;
-  padding: 2px 6px;
-  border-radius: 999px;
-  color: #6d5a3e;
-  background: rgba(111, 83, 46, 0.08);
 }
 
 .fullscreen-layer {
@@ -1330,99 +1160,6 @@ select:focus-visible {
     linear-gradient(180deg, rgba(246, 231, 190, 0.96), rgba(218, 195, 139, 0.96));
 }
 
-.document-hero {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 18px;
-  margin-bottom: 14px;
-  padding: 20px 24px;
-  border-bottom: 0;
-}
-
-.document-hero p {
-  margin: 0 0 4px;
-  color: var(--cinnabar);
-  font-weight: 700;
-  letter-spacing: 0.12em;
-}
-
-.document-hero h2 {
-  margin: 0;
-  color: var(--paper);
-  font-size: clamp(1.25rem, 2vw, 1.8rem);
-}
-
-.document-resources {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.document-resources span,
-.metric-pill {
-  display: inline-flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-height: 34px;
-  padding: 7px 9px;
-  border: 1px solid rgba(111, 83, 46, 0.16);
-  border-radius: 6px;
-  background: rgba(255, 250, 235, 0.48);
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-.document-resources b,
-.metric-pill b {
-  color: #3d2b18;
-}
-
-.metric-pill.good b {
-  color: #2f7651;
-}
-
-.document-metrics.compact {
-  gap: 6px;
-}
-
-.document-metrics.compact .metric-pill {
-  min-height: 30px;
-  padding: 5px 7px;
-  font-size: 0.8rem;
-}
-
-.external-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 10px;
-}
-
-.external-line {
-  min-width: 0;
-  padding: 10px;
-  border: 1px solid rgba(111, 83, 46, 0.18);
-  border-radius: 6px;
-  background: rgba(255, 250, 235, 0.34);
-}
-
-.external-line p {
-  margin: 8px 0 0;
-  color: #5a4630;
-  font-size: 0.86rem;
-  line-height: 1.65;
-}
-
-.metric-pill.warn b {
-  color: #a06d18;
-}
-
-.metric-pill.danger b {
-  color: #a64036;
-}
-
 .document-section {
   display: grid;
   gap: 10px;
@@ -1433,12 +1170,6 @@ select:focus-visible {
 
 .document-section:last-child {
   border-bottom: 0;
-}
-
-.section-note {
-  margin: -4px 0 8px;
-  color: #6a5a40;
-  font-size: 0.82rem;
 }
 
 .memorial-text {
@@ -1482,173 +1213,6 @@ select:focus-visible {
   margin: 0;
   color: #704c1e;
   font-size: 1.02rem;
-}
-
-.document-metrics {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.document-table {
-  display: grid;
-  border-top: 1px solid rgba(111, 83, 46, 0.16);
-}
-
-.document-row {
-  display: grid;
-  grid-template-columns: 70px 130px minmax(0, 1fr);
-  gap: 12px;
-  align-items: start;
-  padding: 10px 0;
-  border-bottom: 1px solid rgba(111, 83, 46, 0.12);
-}
-
-.document-row span {
-  color: var(--muted);
-}
-
-.document-row b {
-  color: #673f20;
-}
-
-.document-row p {
-  margin: 0;
-  color: #6b5d46;
-}
-
-.issue-board {
-  display: grid;
-  gap: 12px;
-}
-
-.issue-group {
-  display: grid;
-  gap: 8px;
-}
-
-.issue-group h3 {
-  margin: 0;
-  color: #57361e;
-  font-size: 0.92rem;
-}
-
-.issue-list {
-  display: grid;
-  border-top: 1px solid rgba(111, 83, 46, 0.14);
-}
-
-.issue-line {
-  display: grid;
-  gap: 7px;
-  padding: 10px 0;
-  border-bottom: 1px solid rgba(111, 83, 46, 0.12);
-}
-
-.issue-line.good .issue-progress i {
-  background: linear-gradient(90deg, #b7852c, #3f7a61);
-}
-
-.issue-line.warn .issue-progress i {
-  background: linear-gradient(90deg, #a64036, #b7852c);
-}
-
-.issue-line.danger .issue-progress i {
-  background: linear-gradient(90deg, #7f2e26, #a64036);
-}
-
-.issue-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  min-width: 0;
-}
-
-.issue-head b {
-  min-width: 0;
-  color: #673f20;
-}
-
-.issue-head span {
-  flex: 0 0 auto;
-  color: var(--muted);
-  font-size: 0.82rem;
-}
-
-.issue-progress {
-  display: grid;
-  grid-template-columns: minmax(48px, auto) minmax(120px, 1fr) minmax(48px, auto);
-  gap: 8px;
-  align-items: center;
-  color: var(--muted);
-  font-size: 0.78rem;
-}
-
-.issue-progress div {
-  height: 10px;
-  overflow: hidden;
-  border: 1px solid rgba(111, 83, 46, 0.16);
-  border-radius: 999px;
-  background: rgba(111, 83, 46, 0.1);
-}
-
-.issue-progress i {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, #a64036, #b7852c 48%, #3f7a61);
-}
-
-.issue-line p {
-  margin: 0;
-  color: #6b5d46;
-}
-
-.issue-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-}
-
-.issue-tags small {
-  padding: 2px 6px;
-  border-radius: 999px;
-  color: #6d5a3e;
-  background: rgba(111, 83, 46, 0.08);
-}
-
-.report-ledger {
-  display: grid;
-  gap: 14px;
-}
-
-.report-ledger article {
-  display: grid;
-  grid-template-columns: 86px minmax(0, 1fr);
-  gap: 12px;
-  align-items: start;
-}
-
-.report-ledger h2 {
-  margin: 0;
-}
-
-.report-ledger p {
-  padding-left: 12px;
-  border-left: 2px solid rgba(111, 83, 46, 0.14);
-}
-
-.brief-list {
-  display: grid;
-  gap: 6px;
-  margin: 0;
-  padding: 0 0 0 18px;
-  color: #5f4d34;
-}
-
-.brief-list li {
-  padding-left: 2px;
 }
 
 .chat-full-grid {
@@ -1717,21 +1281,10 @@ select:focus-visible {
   color: var(--muted);
 }
 
-.skill-strip,
-.hitl-bar {
+.hitl-bar{
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-}
-
-.skill-strip span {
-  max-width: 100%;
-  padding: 4px 7px;
-  border: 1px solid rgba(63, 122, 97, 0.25);
-  border-radius: 999px;
-  color: #2f7651;
-  background: rgba(215, 232, 205, 0.48);
-  font-size: 0.76rem;
 }
 
 .chat-main {
@@ -1838,8 +1391,7 @@ select:focus-visible {
   border-color: rgba(140, 60, 20, 0.6);
 }
 
-.chat-input,
-.edict-controls label {
+.chat-input{
   display: grid;
   gap: 6px;
   color: var(--muted);
@@ -1981,12 +1533,6 @@ button:disabled {
 
 .edict-compose {
   grid-template-rows: auto auto minmax(0, 1fr) auto;
-}
-
-.edict-controls {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
 }
 
 .edict-compose textarea {
@@ -2183,9 +1729,7 @@ button:disabled {
   box-shadow: none !important;
 }
 
-/* 文字承载块加半透明白底，背景图太花时字看得清 */
-.modal-bg-state .document-hero,
-.modal-bg-state .document-section {
+.modal-bg-state .document-section{
   background: rgba(252, 249, 240, 0.5) !important;
   border-radius: 6px;
 }
@@ -2286,24 +1830,10 @@ button:disabled {
   background: linear-gradient(180deg, #c0432f, #7c241b) !important;
 }
 
-.modal-bg-state .issue-progress div,
-.modal-bg-state .issue-progress i {
-  background: rgba(20, 16, 11, 0.5) !important;
-}
-
-.modal-bg-state .issue-line.good .issue-progress i,
-.modal-bg-state .issue-line.warn .issue-progress i,
-.modal-bg-state .issue-line.danger .issue-progress i,
-.modal-bg-state .issue-progress i {
-  background: linear-gradient(90deg, #a64036, #b7852c 48%, #3f7a61) !important;
-}
-
 /* 透明后保留极淡分隔边 */
 .modal-bg-state .modal-pane,
 .modal-bg-edict .modal-pane,
-.modal-bg-state .info-cell,
-.modal-bg-state .army-card,
-.modal-bg-edict .directive-item {
+.modal-bg-edict .directive-item{
   border-color: rgba(255, 232, 170, 0.22) !important;
 }
 
@@ -2551,25 +2081,6 @@ button:disabled {
   justify-content: space-between;
   gap: 6px;
   margin-bottom: 3px;
-}
-
-.situation-kind {
-  flex: 0 0 auto;
-  padding: 1px 5px;
-  border-radius: 3px;
-  font-size: 0.7rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-}
-
-.situation-kind.initiative {
-  color: #ffe4b0;
-  background: #9c392c;
-}
-
-.situation-kind.situation {
-  color: #5a4a32;
-  background: rgba(67, 37, 15, 0.15);
 }
 
 .situation-name {
@@ -2849,27 +2360,8 @@ button:disabled {
     min-height: 520px;
   }
 
-  .edict-controls,
-  .edict-actions,
-  .intel-grid,
-  .issue-progress,
-  .document-row,
-  .report-ledger article {
+  .edict-actions{
     grid-template-columns: 1fr;
-  }
-
-  .document-hero {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .document-resources {
-    justify-content: flex-start;
-  }
-
-  .report-ledger p {
-    padding-left: 0;
-    border-left: 0;
   }
 }
 
@@ -2955,15 +2447,6 @@ button:disabled {
   margin: 0 0 14px;
   color: #d8c79a;
   font-size: 16px;
-}
-
-.settlement-lock-stages {
-  margin: 0;
-  padding-left: 22px;
-  text-align: left;
-  color: #c8b78a;
-  font-size: 15px;
-  line-height: 1.7;
 }
 
 .settlement-spin {
@@ -3069,55 +2552,6 @@ button:disabled {
   word-break: break-all;
   max-height: 240px;
   overflow: auto;
-}
-
-/* 奏疏 modal 顶部 tab 切换 */
-.report-tabs {
-  display: flex;
-  gap: 0;
-  padding: 8px 16px 0;
-  border-bottom: 1px solid rgba(120, 84, 32, 0.25);
-  background: rgba(40, 32, 22, 0.04);
-}
-
-.report-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 18px;
-  border: 1px solid transparent;
-  border-bottom: none;
-  border-radius: 6px 6px 0 0;
-  background: transparent;
-  color: #8a6424;
-  font-size: 0.9rem;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.report-tab:hover {
-  color: #5a2018;
-  background: rgba(248, 244, 234, 0.5);
-}
-
-.report-tab.is-active {
-  color: #5a2018;
-  background: rgba(248, 244, 234, 0.95);
-  border-color: rgba(120, 84, 32, 0.35);
-  border-bottom: 1px solid rgba(248, 244, 234, 0.95);
-  margin-bottom: -1px;
-}
-
-.report-body {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  min-width: 0;
-}
-
-.report-scroll {
-  flex: 1 1 auto;
-  min-height: 0;
 }
 
 /* 局势条 - 已结案/已崩坏强调 */
@@ -3989,13 +3423,6 @@ button:disabled {
   margin-bottom: 5px;
 }
 
-.so-content {
-  font-size: 0.82rem;
-  color: #d8ccaa;
-  line-height: 1.5;
-  margin-bottom: 6px;
-}
-
 .so-open-hint {
   margin-top: 6px;
   color: rgba(90, 58, 16, 0.76);
@@ -4036,25 +3463,6 @@ button:disabled {
   padding: 24px 0;
 }
 .modal-bg-edict .so-empty { color: #9a7a50; }
-
-.so-result {
-  font-size: 0.80rem;
-  color: #a8c8a8;
-  font-style: italic;
-  margin-bottom: 6px;
-  border-left: 2px solid rgba(100,180,100,0.4);
-  padding-left: 8px;
-}
-.so-result-label {
-  display: block;
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  color: #70a870;
-  margin-bottom: 3px;
-  font-style: normal;
-}
-.modal-bg-edict .so-result-label { color: #3a6a2a !important; }
 
 .so-goto {
   margin-top: 4px;
@@ -4194,8 +3602,6 @@ button:disabled {
 
 .modal-bg-edict .so-title { color: #3a1a05 !important; }
 .modal-bg-edict .so-meta  { color: #6b4a20 !important; }
-.modal-bg-edict .so-content { color: #3a2a10 !important; }
-.modal-bg-edict .so-result { color: #3a5a2a !important; }
 
 .modal-bg-edict .so-status {
   background: rgba(120, 80, 20, 0.15) !important;

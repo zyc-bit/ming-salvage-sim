@@ -49,21 +49,15 @@ def _guess_caller_tag(kwargs: Dict[str, object]) -> str:
     return "?"
 
 
-def _record_usage(model_id: str, usage: object, caller_tag: str = "?") -> None:
-    if usage is None:
-        return
+def _accumulate_and_log(
+    model_id: str, prompt: int, completion: int, total: int,
+    cached: int, cache_creation: int, reasoning: int, caller_tag: str,
+) -> None:
+    """累加到 TOKEN_STATS 并打印 [TOKEN] 行（usage/stream 两路共用）。"""
     bucket = TOKEN_STATS.setdefault(
         model_id,
         {"calls": 0, "prompt": 0, "completion": 0, "cached": 0, "reasoning": 0, "total": 0},
     )
-    prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
-    completion = int(getattr(usage, "completion_tokens", 0) or 0)
-    total = int(getattr(usage, "total_tokens", prompt + completion) or 0)
-    prompt_details = getattr(usage, "prompt_tokens_details", None)
-    cached = int(getattr(prompt_details, "cached_tokens", 0) or 0) if prompt_details else 0
-    cache_creation = int(getattr(prompt_details, "cache_creation_input_tokens", 0) or 0) if prompt_details else 0
-    completion_details = getattr(usage, "completion_tokens_details", None)
-    reasoning = int(getattr(completion_details, "reasoning_tokens", 0) or 0) if completion_details else 0
     bucket["calls"] += 1
     bucket["prompt"] += prompt
     bucket["completion"] += completion
@@ -77,6 +71,20 @@ def _record_usage(model_id: str, usage: object, caller_tag: str = "?") -> None:
         f"completion={completion} reasoning={reasoning} total={total}",
         flush=True,
     )
+
+
+def _record_usage(model_id: str, usage: object, caller_tag: str = "?") -> None:
+    if usage is None:
+        return
+    prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+    completion = int(getattr(usage, "completion_tokens", 0) or 0)
+    total = int(getattr(usage, "total_tokens", prompt + completion) or 0)
+    prompt_details = getattr(usage, "prompt_tokens_details", None)
+    cached = int(getattr(prompt_details, "cached_tokens", 0) or 0) if prompt_details else 0
+    cache_creation = int(getattr(prompt_details, "cache_creation_input_tokens", 0) or 0) if prompt_details else 0
+    completion_details = getattr(usage, "completion_tokens_details", None)
+    reasoning = int(getattr(completion_details, "reasoning_tokens", 0) or 0) if completion_details else 0
+    _accumulate_and_log(model_id, prompt, completion, total, cached, cache_creation, reasoning, caller_tag)
 
 
 def record_stream_metrics(model_id: str, metrics: object, caller_tag: str = "?") -> None:
@@ -96,23 +104,7 @@ def record_stream_metrics(model_id: str, metrics: object, caller_tag: str = "?")
     reasoning = int(getattr(metrics, "reasoning_tokens", 0) or 0)
     if total == 0 and prompt == 0 and completion == 0:
         return
-    bucket = TOKEN_STATS.setdefault(
-        model_id,
-        {"calls": 0, "prompt": 0, "completion": 0, "cached": 0, "reasoning": 0, "total": 0},
-    )
-    bucket["calls"] += 1
-    bucket["prompt"] += prompt
-    bucket["completion"] += completion
-    bucket["cached"] += cached
-    bucket["cache_creation"] = bucket.get("cache_creation", 0) + cache_creation
-    bucket["reasoning"] += reasoning
-    bucket["total"] += total
-    cc_part = f" cache_creation={cache_creation}" if cache_creation else ""
-    print(
-        f"[TOKEN] caller={caller_tag} model={model_id} prompt={prompt} cached={cached}{cc_part} "
-        f"completion={completion} reasoning={reasoning} total={total}",
-        flush=True,
-    )
+    _accumulate_and_log(model_id, prompt, completion, total, cached, cache_creation, reasoning, caller_tag)
 
 
 def _get_client_base_url(self_client_holder: object) -> str:

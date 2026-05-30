@@ -304,30 +304,6 @@ def _write_llm_memories(db: GameDB, state: GameState, data: Dict[str, object]) -
     return count
 
 
-def extract_event_memories_with_agent(
-    agent: Agent,
-    db: GameDB,
-    state: GameState,
-    directives: List[object],
-    decree_text: str,
-    narrative: str,
-    extractor_output: str,
-    applied: Dict[str, object],
-) -> int:
-    payload = {
-        "turn": {"year": state.year, "period": state.period, "turn": state.turn},
-        "directives": [_row_to_dict(row) for row in directives],
-        "decree_text": decree_text,
-        "narrative": narrative,
-        "applied": applied,
-        "extractor_output": extractor_output,
-        "instruction": "提取渐进式事件记忆摘要卡和来源摘录。",
-    }
-    raw = run_agent_text(agent, json.dumps(payload, ensure_ascii=False, sort_keys=False), tag="memory-extractor")
-    data = parse_agent_json(raw, "记忆抽取")
-    return _write_llm_memories(db, state, data)
-
-
 def extract_chat_memories_for_minister(
     agent: Agent,
     db: GameDB,

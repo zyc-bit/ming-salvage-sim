@@ -20,7 +20,6 @@ import {
   Shield,
   Star,
   Trash2,
-  Swords,
   Upload,
   X,
 } from "lucide-react";
@@ -524,32 +523,6 @@ const formatClosedEffect = (effect: any) => {
   }
   return parts.length ? parts.join("、") : "无直接数值影响";
 };
-
-const splitReportItems = (text: string, prefix: string) => {
-  const cleaned = text.replace(prefix, "").trim();
-  const totalMatch = cleaned.match(/(两京十三省账面[月]税合计[^。]+|建档兵力合计[^。]+)。?$/);
-  const itemsPart = totalMatch ? cleaned.slice(0, totalMatch.index).replace(/。$/, "") : cleaned.replace(/。$/, "");
-  return {
-    items: itemsPart.split("；").map((item) => item.replace(/^。+|。+$/g, "").trim()).filter(Boolean),
-    tail: totalMatch?.[1] || "",
-  };
-};
-
-const briefTreasury = (state: GameState) => [
-  `固定预算：国库月净${formatSignedMoney(state.budget["国库"].net)}，内库月净${formatSignedMoney(state.budget["内库"].net)}。`,
-  `账面余银：国库${formatMoney(state.budget["国库"].balance)}，内库${formatMoney(state.budget["内库"].balance)}。`,
-];
-
-const briefRegionWarnings = (text: string) => {
-  const { items, tail } = splitReportItems(text, "地区警讯：");
-  return [...items.slice(0, 3), tail].filter(Boolean);
-};
-
-const briefArmyWarnings = (text: string) => {
-  const { items, tail } = splitReportItems(text, "军队警讯：");
-  return [...items.slice(0, 3), tail].filter(Boolean);
-};
-
 
 const getMapIntelStyle = (node: MapNode): React.CSSProperties => {
   const left = Math.min(82, Math.max(18, node.x));
@@ -1512,14 +1485,12 @@ function courtSlots(): { px: number; py: number; side: "left" | "right"; slot: n
   return slots;
 }
 
-// 找最近槽位（已被占用的跳过，但允许同名覆盖）
-function snapToSlot(px: number, py: number, occupied: Set<string>, selfKey: string): { px: number; py: number } {
+// 找最近槽位
+function snapToSlot(px: number, py: number): { px: number; py: number } {
   const slots = courtSlots();
   let best = null as { px: number; py: number } | null;
   let bestDist = Infinity;
   for (const s of slots) {
-    const key = `${s.side}:${s.slot}`;
-    if (occupied.has(key) && key !== selfKey) continue;
     const d = Math.hypot(s.px - px, s.py - py);
     if (d < bestDist) { bestDist = d; best = s; }
   }
@@ -1688,10 +1659,8 @@ function MinisterCardList({
         setPositions((prev) => {
           const cur = prev[dragName];
           if (!cur) return prev;
-          // 已占槽位（其他大臣）
-          const occupied = new Set<string>();
           // 找吸附目标
-          const snapped = snapToSlot(cur.px, cur.py, occupied, "");
+          const snapped = snapToSlot(cur.px, cur.py);
           const next = { ...prev, [dragName]: snapped };
           saveCourtPos(next);
           return next;
@@ -3282,10 +3251,7 @@ function pickField(obj: any, cn: string, en: string): any {
   return obj[cn] ?? obj[en];
 }
 
-function pickItem(obj: any, cn: string, en: string): any {
-  if (!obj || typeof obj !== "object") return undefined;
-  return obj[cn] ?? obj[en];
-}
+const pickItem = pickField;
 
 function ExtractionSection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -3517,37 +3483,6 @@ function NewArmiesBlock({ data }: { data: any }) {
   );
 }
 
-function PreviousSummary({ summary }: { summary: string }) {
-  if (!summary) {
-    return <p className="long-copy">登基伊始，尚无上月回奏。</p>;
-  }
-  const lines = summary.split("\n").map((line) => line.trim()).filter(Boolean);
-  const rows = lines
-    .map((line) => {
-      const idx = line.indexOf("：");
-      if (idx <= 0) return null;
-      return { label: line.slice(0, idx), value: line.slice(idx + 1) };
-    })
-    .filter((row): row is { label: string; value: string } => !!row && !!row.value);
-
-  if (!rows.length) {
-    return <p className="long-copy">{summary}</p>;
-  }
-
-  return (
-    <table className="summary-table">
-      <tbody>
-        {rows.map((row) => (
-          <tr key={row.label}>
-            <th>{row.label}</th>
-            <td>{row.value}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
-
 function StateModal({ state }: { state: GameState }) {
   const report = state.last_report || state.previous_summary;
   return (
@@ -3557,17 +3492,6 @@ function StateModal({ state }: { state: GameState }) {
           ? <pre className="memorial-text">{report}</pre>
           : <div className="empty-note">尚无上月奏报。</div>}
       </section>
-    </article>
-  );
-}
-
-function BriefReport({ title, items }: { title: string; items: string[] }) {
-  return (
-    <article>
-      <h2>{title}</h2>
-      <ul className="brief-list">
-        {items.map((item) => <li key={`${title}-${item}`}>{item}</li>)}
-      </ul>
     </article>
   );
 }
@@ -3647,38 +3571,6 @@ function SituationPanel({ issues, closedIssues }: { issues: Issue[]; closedIssue
         ))}
       </div>}
     </aside>
-  );
-}
-
-function IssueGroup({ title, issues }: { title: string; issues: Issue[] }) {
-  if (!issues.length) return null;
-  return (
-    <div className="issue-group">
-      <h3>{title}</h3>
-      <div className="issue-list">
-        {issues.map((issue) => (
-          <article className={`issue-line ${issueTone(issue.bar_value)}`} key={issue.id}>
-            <div className="issue-head">
-              <b>#{issue.id} {issue.title}</b>
-              <span>{issue.phase} · {issue.bar_value}</span>
-            </div>
-            <div className="issue-progress" aria-label={`${issue.title}进度 ${issue.bar_value}`}>
-              <span>{issue.bar_bad_meaning}</span>
-              <div>
-                <i style={{ width: `${Math.max(0, Math.min(100, issue.bar_value))}%` }} />
-              </div>
-              <span>{issue.bar_good_meaning}</span>
-            </div>
-            <p>{issue.stage_text}</p>
-            {issue.tags.length ? (
-              <div className="issue-tags">
-                {issue.tags.map((tag) => <small key={tag}>{tag}</small>)}
-              </div>
-            ) : null}
-          </article>
-        ))}
-      </div>
-    </div>
   );
 }
 
@@ -4274,15 +4166,6 @@ function NodeIntel({ node }: { node: MapNode }) {
         </>
       ) : null}
     </>
-  );
-}
-
-function Info({ label, value, tone }: { label: string; value: React.ReactNode; tone?: string }) {
-  return (
-    <div className={`info-cell ${tone || ""}`}>
-      <span>{label}</span>
-      <b>{value}</b>
-    </div>
   );
 }
 

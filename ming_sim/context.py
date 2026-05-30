@@ -6,16 +6,14 @@
 
 from __future__ import annotations
 
-import json
-import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
 from ming_sim.constants import ECONOMY_ACCOUNTS, TURN_UNIT
 from ming_sim.assets import format_money, format_money_delta
 from ming_sim.content import GameContent
 from ming_sim.db import GameDB
 from ming_sim.exceptions import LLMContractError
-from ming_sim.models import Army, Character, Event, GameState, Region
+from ming_sim.models import Character, GameState
 from ming_sim.skills import available_skill_names, office_skills
 
 _content: Optional[GameContent] = None
@@ -117,20 +115,6 @@ def victory_status(db: GameDB, state: GameState) -> Dict[str, object]:
     }
 
 
-# 地区/军队名称匹配实现在 matching.py；此处提供绑定 GameContent 的便捷封装。
-from ming_sim.matching import army_aliases, compact_name, region_aliases  # noqa: E402,F401
-from ming_sim.matching import match_army_id_from_text as _match_army
-from ming_sim.matching import match_region_id_from_text as _match_region
-
-
-def match_region_id_from_text(text: str) -> Optional[str]:
-    return _match_region(text, _ctx().regions)
-
-
-def match_army_id_from_text(text: str) -> Optional[str]:
-    return _match_army(text, _ctx().armies)
-
-
 def state_context(state: GameState) -> str:
     parts = []
     for key, value in state.metrics.items():
@@ -139,22 +123,6 @@ def state_context(state: GameState) -> str:
         else:
             parts.append(f"{key}{value}")
     return "，".join(parts)
-
-
-def parse_json_dict(raw: str) -> Dict[str, int]:
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as error:
-        raise LLMContractError(f"数据库中的数值变化 JSON 已损坏：{raw[:200]}") from error
-    if not isinstance(data, dict):
-        raise LLMContractError(f"数据库中的数值变化不是 object：{raw[:200]}")
-    parsed: Dict[str, int] = {}
-    for key, value in data.items():
-        try:
-            parsed[str(key)] = int(value)
-        except (TypeError, ValueError) as error:
-            raise LLMContractError(f"数据库中的数值变化字段不是整数：{key}={value}") from error
-    return parsed
 
 
 def format_metric_delta(delta: Dict[str, int]) -> str:
@@ -183,25 +151,6 @@ def character_context(character: Character) -> str:
 
 def character_context_with_db(character: Character, db: GameDB) -> str:
     return character_context(character) + f"，当前可用技能：{available_skill_names(character, db)}"
-
-
-def event_context(event: Event) -> str:
-    return (
-        f"{event.title}。类型：{event.kind}。奏报：{event.summary} "
-        f"紧急{event.urgency}，严重{event.severity}，可信{event.credibility}。"
-        f"牵涉利益：{', '.join(event.interests)}。"
-    )
-
-
-def first_character() -> Character:
-    try:
-        return next(iter(_ctx().characters.values()))
-    except StopIteration as error:
-        raise SystemExit("characters.json 至少需要一个人物。") from error
-
-
-def first_character_name() -> str:
-    return first_character().name
 
 
 def character_from_name(name: object) -> Character:

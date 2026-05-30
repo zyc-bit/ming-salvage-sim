@@ -21,11 +21,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from ming_sim.constants import ROOT_DIR
 from ming_sim.paths import bundled_path, user_data_path, user_data_dir
-from ming_sim.exceptions import ExitGame, LLMUnavailable
+from ming_sim.exceptions import LLMUnavailable
 from ming_sim.llm_config import (
-    load_llm_config,
     load_runtime_llm,
     normalize_openai_base_url,
     save_runtime_llm,
@@ -36,9 +34,7 @@ from ming_sim.issues import _format_issue_ongoing
 from ming_sim.session import GameSession
 from ming_sim.session import AUTO_SAVE_PREFIX
 from ming_sim.skills import available_skill_ids, skill_display_name, skill_source_labels
-from ming_sim.context import match_minister_from_text
 from ming_sim.flows import calc_province_fiscal
-from ming_sim.exceptions import LLMContractError  # noqa: F401  (保留：供错误处理)
 from ming_sim.models import Character, LLMConfig, monthly_amount
 
 WEB_DIST = bundled_path("web", "dist")
@@ -762,47 +758,6 @@ class WebGame:
             "minister_message_id": message_id,
         }
 
-    def chat(self, minister_name: str, message: str) -> Dict[str, Any]:
-        if minister_name not in self.content.characters and minister_name not in self.session.temporary_characters:
-            raise HTTPException(status_code=404, detail=f"未找到大臣：{minister_name}")
-        text = message.strip()
-        if not text:
-            raise HTTPException(status_code=400, detail="问话不能为空。")
-        self.chat_history.setdefault(minister_name, []).append({"role": "user", "content": text})
-        message_id = 0
-        if minister_name not in self.session.temporary_characters:
-            message_id = self.db.append_chat_message(minister_name, self.state.turn, "user", text)
-        character = self.session._character(minister_name)
-        location = self.db.character_location(minister_name) or character.location or self.state.court_location
-        if location != self.state.court_location:
-            letter = self.session.dispatch_letter(minister_name, text, chat_message_id=message_id)
-            notice = (
-                f"书信已发往{letter['destination_label']}，预计"
-                f"{letter['arrival_date']['year']}年{letter['arrival_date']['period']}月{letter['arrival_date']['day']}日送达；"
-                f"最早{letter['earliest_reply_date']['year']}年{letter['earliest_reply_date']['period']}月{letter['earliest_reply_date']['day']}日收到回信。"
-            )
-            return {
-                "minister": minister_name,
-                "answer": notice,
-                "history": self.chat_history[minister_name],
-                "suggestions": self.suggestions_for(character),
-                "directives": [self.directive_payload(row) for row in self.directive_rows()],
-                "letter_sent": letter,
-            }
-        result = self.session.chat(minister_name, text)
-        proposed = None
-        if result.proposed_directive is not None:
-            d = result.proposed_directive
-            proposed = {"id": d.id, "text": d.text, "status": d.status, "notes": d.notes}
-        return self._chat_payload(
-            minister_name, result.answer,
-            court_action=result.court_action, next_minister=result.next_minister,
-            proposed_directive=proposed, appointed_minister=result.appointed_minister,
-            registered_minister=result.registered_minister,
-            displaced_minister=result.displaced_minister,
-            secret_order_id=result.secret_order_id,
-        )
-
     def chat_stream(self, minister_name: str, message: str) -> Iterator[Dict[str, Any]]:
         if minister_name not in self.content.characters and minister_name not in self.session.temporary_characters:
             yield {"type": "error", "message": f"未找到大臣：{minister_name}"}
@@ -1283,16 +1238,6 @@ async def api_history_turn(turn: int) -> Dict[str, Any]:
     }
 
 
-@app.get("/api/map")
-async def api_map() -> Dict[str, Any]:
-    return {"nodes": get_game().map_nodes()}
-
-
-@app.get("/api/buildings")
-async def api_buildings(region_id: str = "") -> Dict[str, Any]:
-    return {"buildings": get_game().db.building_payload(region_id)}
-
-
 @app.post("/api/favorites/{minister_name}")
 async def api_add_favorite(minister_name: str) -> Dict[str, Any]:
     if minister_name not in get_game().content.characters:
@@ -1349,15 +1294,12 @@ async def api_create_secret_order(minister_name: str, request: SecretOrderReques
     game = get_game()
     character = game.session.content.characters.get(minister_name)
     if not character:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail=f"未找到大臣：{minister_name}")
     if game.character_power_id(character) != "ming":
-        from fastapi import HTTPException
         raise HTTPException(status_code=409, detail=f"{minister_name}不属大明朝廷，无法下达密令。")
     title = request.title.strip()[:20]
     content = request.content.strip()
     if not title or not content:
-        from fastapi import HTTPException
         raise HTTPException(status_code=400, detail="title 和 content 不能为空")
     order_id = game.db.create_secret_order(
         game.session.state, minister_name, title, content, request.tags, deadline_months=request.deadline_months
@@ -1374,12 +1316,6 @@ async def api_create_secret_order(minister_name: str, request: SecretOrderReques
     }
 
 
-@app.post("/api/ministers/{minister_name}/chat")
-async def api_chat(minister_name: str, request: ChatRequest) -> Dict[str, Any]:
-    _require_active_minister(minister_name)
-    return get_game().chat(minister_name, request.message)
-
-
 @app.post("/api/ministers/{minister_name}/chat/stream")
 async def api_chat_stream(minister_name: str, request: ChatRequest) -> StreamingResponse:
     _require_active_minister(minister_name)
@@ -1390,8 +1326,6 @@ async def api_chat_stream(minister_name: str, request: ChatRequest) -> Streaming
                 yield sse_event("delta", {"content": item.get("content", "")})
             elif item_type == "letter_sent":
                 yield sse_event("letter_sent", item.get("payload", {}))
-            elif item_type in {"immediate_stage", "immediate_thinking", "immediate_text", "immediate_done", "immediate_error"}:
-                yield sse_event(item_type, {"content": item.get("content", "")})
             elif item_type == "done":
                 yield sse_event("done", item.get("payload", {}))
             elif item_type == "error":
@@ -1458,17 +1392,6 @@ async def api_write_decree() -> Dict[str, Any]:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
     return {"decree": decree}
-
-
-@app.post("/api/decree/issue")
-async def api_issue_decree() -> Dict[str, Any]:
-    """非流式颁诏即时结算（保留兼容）。前端默认走 /api/decree/issue/stream。"""
-    try:
-        report = get_game().session.resolve_turn()
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from None
-    decree = get_game().session.last_decree
-    return {"decree": decree, "report": report, "state": get_game().state_payload()}
 
 
 @app.post("/api/decree/issue/stream")

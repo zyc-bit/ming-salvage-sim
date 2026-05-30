@@ -12,21 +12,6 @@ from ming_sim.models import GameState, monthly_amount
 
 # ── 省级财政计算 ──────────────────────────────────────────────────────────────
 
-# 皇庄增量租率：没收藩王庄田转皇庄后，每万亩每月增加内库收入（万两）
-# 基准皇庄收入走 fiscal_config.皇庄_base；此常数只用于增量计算
-_HUANG_TIAN_RENT_PER_WAN_MU = 0.57  # ≈ 20万两/月 ÷ 35万亩
-
-
-def _province_transport_ratio(fiscal: dict, unrest: int) -> float:
-    """解运比（保留函数签名，返回1.0；实际损耗已并入 _province_efficiency）。"""
-    return 1.0
-
-
-def _province_collection_rate(gentry_resistance: int, unrest: int) -> float:
-    """实收率（保留函数签名，返回1.0；实际损耗已并入 _province_efficiency）。"""
-    return 1.0
-
-
 def _province_efficiency(fiscal: dict, gentry_resistance: int, unrest: int) -> float:
     """综合到账率：士绅阻力 + 腐败度 + 民变三因子决定税银实际到账比例。
     上限 1.0（现代化/彻底改革后可接近满额），下限 0.05（完全失控）。

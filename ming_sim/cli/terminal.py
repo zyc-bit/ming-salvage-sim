@@ -14,7 +14,7 @@ from ming_sim.constants import COURT_BREAK_COMMANDS, EXIT_COMMANDS, TURN_UNIT
 from ming_sim.assets import wrap
 from ming_sim.context import match_minister_from_text
 from ming_sim.exceptions import ExitGame
-from ming_sim.models import Character, GameState
+from ming_sim.models import Character
 from ming_sim.session import GameSession, TurnPhase
 from ming_sim.skills import print_all_skill_cards, print_skill_card, skill_display_name
 

@@ -25,6 +25,9 @@ data/
 *.sqlite
 *.sqlite3
 
+# Probe run outputs (探针脚本产物，重跑即再生)
+scripts/runs/
+
 # OS / editor noise
 .DS_Store
 Thumbs.db

@@ -12,13 +12,6 @@ from ming_sim.constants import ECONOMY_ACCOUNTS
 
 
 @dataclass
-class ChatResult:
-    action: str
-    next_minister: str = ""
-    refresh_ministers: List[str] = field(default_factory=list)
-
-
-@dataclass
 class LLMConfig:
     api_key: str
     base_url: str

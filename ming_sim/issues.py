@@ -105,6 +105,15 @@ def _apply_issue_buildings(
     return applied
 
 
+def _apply_terminal_effect(db: GameDB, state: GameState, effect: Dict[str, object], reason: str) -> List[Dict[str, object]]:
+    """局势 resolved/failed 终结效果一锤子落地：metrics + economy + factions + buildings。
+    返回建筑操作列表（close 处需要；advance/inertia 处忽略）。"""
+    _apply_metric_dict(state, effect.get("metrics") or {})
+    _apply_economy_list(db, state, effect.get("economy") or [])
+    _apply_faction_dict(db, effect.get("factions") or {})
+    return _apply_issue_buildings(db, state, effect.get("buildings"), _ISSUE_PSEUDO_EVENT, reason)
+
+
 def issue_to_payload(row: sqlite3.Row, recent_advances: List[sqlite3.Row]) -> Dict[str, object]:
     """喂给推演 agent 的事项精简视图：状态、进度、效果、最近一次推进。"""
     keys = row.keys() if hasattr(row, "keys") else []
@@ -528,16 +537,10 @@ def apply_issue_tracker_output(
         # 终结结算：bar 自然推到 100/0 触发的 resolved/failed，与 close_issues 一样落终结效果（含建筑）
         if new_row["status"] == "resolved":
             effect = json.loads(new_row["effect_on_resolve"] or "{}")
-            _apply_metric_dict(state, effect.get("metrics") or {})
-            _apply_economy_list(db, state, effect.get("economy") or [])
-            _apply_faction_dict(db, effect.get("factions") or {})
-            _apply_issue_buildings(db, state, effect.get("buildings"), _ISSUE_PSEUDO_EVENT, f"局势#{issue_id}结案")
+            _apply_terminal_effect(db, state, effect, f"局势#{issue_id}结案")
         elif new_row["status"] == "failed":
             effect = json.loads(new_row["effect_on_fail"] or "{}")
-            _apply_metric_dict(state, effect.get("metrics") or {})
-            _apply_economy_list(db, state, effect.get("economy") or [])
-            _apply_faction_dict(db, effect.get("factions") or {})
-            _apply_issue_buildings(db, state, effect.get("buildings"), _ISSUE_PSEUDO_EVENT, f"局势#{issue_id}失败")
+            _apply_terminal_effect(db, state, effect, f"局势#{issue_id}失败")
         applied_advances.append({
             "issue_id": issue_id,
             "title": new_row["title"],
@@ -638,12 +641,8 @@ def apply_issue_tracker_output(
             effect = json.loads(new_row["effect_on_resolve"] or "{}")
         else:
             effect = json.loads(new_row["effect_on_fail"] or "{}")
-        _apply_metric_dict(state, effect.get("metrics") or {})
-        _apply_economy_list(db, state, effect.get("economy") or [])
-        _apply_faction_dict(db, effect.get("factions") or {})
-        building_ops = _apply_issue_buildings(
-            db, state, effect.get("buildings"),
-            _ISSUE_PSEUDO_EVENT, f"局势#{issue_id}{'结案' if reason == 'resolved' else '失败'}",
+        building_ops = _apply_terminal_effect(
+            db, state, effect, f"局势#{issue_id}{'结案' if reason == 'resolved' else '失败'}",
         )
         applied_closes.append({
             "issue_id": issue_id,
@@ -1139,17 +1138,11 @@ def apply_issue_inertia_and_ongoing(
                     continue
                 if new_row["status"] == "resolved":
                     effect = json.loads(new_row["effect_on_resolve"] or "{}")
-                    _apply_metric_dict(state, effect.get("metrics") or {})
-                    _apply_economy_list(db, state, effect.get("economy") or [])
-                    _apply_faction_dict(db, effect.get("factions") or {})
-                    _apply_issue_buildings(db, state, effect.get("buildings"), _ISSUE_PSEUDO_EVENT, f"局势#{issue_id}结案")
+                    _apply_terminal_effect(db, state, effect, f"局势#{issue_id}结案")
                     continue
                 elif new_row["status"] == "failed":
                     effect = json.loads(new_row["effect_on_fail"] or "{}")
-                    _apply_metric_dict(state, effect.get("metrics") or {})
-                    _apply_economy_list(db, state, effect.get("economy") or [])
-                    _apply_faction_dict(db, effect.get("factions") or {})
-                    _apply_issue_buildings(db, state, effect.get("buildings"), _ISSUE_PSEUDO_EVENT, f"局势#{issue_id}失败")
+                    _apply_terminal_effect(db, state, effect, f"局势#{issue_id}失败")
                     continue
                 row = db.conn.execute("SELECT * FROM issues WHERE id=?", (issue_id,)).fetchone()
                 if row is None:
