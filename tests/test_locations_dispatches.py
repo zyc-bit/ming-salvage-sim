@@ -141,7 +141,7 @@ class LocationDispatchTests(unittest.TestCase):
         def fake_day_end(state, db, *args, **kwargs):
             calls.append(("day", state.turn, state.day))
             db.save_turn_report(state, "daily report")
-            return "daily report"
+            return "daily report", {}
 
         def fake_month_summary(*args, **kwargs):
             calls.append(("summary",))
@@ -151,7 +151,7 @@ class LocationDispatchTests(unittest.TestCase):
         session_module.resolve_month_summary = fake_month_summary
         try:
             start_turn = session.state.turn
-            report = session.end_day()
+            report, _alerts = session.end_day()
             self.assertEqual(report, "daily report")
             self.assertEqual(session.state.turn, start_turn + 1)
             self.assertEqual(session.state.day, 2)
@@ -170,7 +170,7 @@ class LocationDispatchTests(unittest.TestCase):
         def fake_day_end(state, db, *args, **kwargs):
             calls.append(("day", state.turn, state.day, state.period))
             db.save_turn_report(state, "day thirty")
-            return "day thirty"
+            return "day thirty", {}
 
         def fake_month_summary(state, db, *args, daily_report="", **kwargs):
             calls.append(("summary", state.turn, state.day, state.period, daily_report))
@@ -185,7 +185,7 @@ class LocationDispatchTests(unittest.TestCase):
             session.db.save_state(session.state)
             start_turn = session.state.turn
             start_period = session.state.period
-            report = session.end_day()
+            report, _alerts = session.end_day()
             self.assertIn("summary", report)
             self.assertEqual(session.state.turn, start_turn + 1)
             self.assertEqual(session.state.day, 1)

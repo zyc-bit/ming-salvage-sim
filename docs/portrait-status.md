@@ -3,7 +3,7 @@
 > 自动生成：`.venv/bin/python scripts/portrait_status.py`。改图后重跑刷新。
 > 大臣 = 专属图 `minister_<中文名>.png`；后宫 = 预设图池 `consort_pool_<N>.png`（不绑人）。
 
-## 大臣专属图（3/61 已生成）
+## 大臣专属图（4/61 已生成）
 
 | 人物 | 文件 | 状态 |
 |---|---|---|
@@ -13,7 +13,7 @@
 | 周延儒 | `minister_周延儒.png` | 已生成 |
 | 毕自严 | `minister_毕自严.png` | 待生成 |
 | 魏忠贤 | `minister_魏忠贤.png` | 已生成 |
-| 客氏 | `minister_客氏.png` | 待生成 |
+| 客氏 | `minister_客氏.png` | 已生成 |
 | 崔呈秀 | `minister_崔呈秀.png` | 待生成 |
 | 田尔耕 | `minister_田尔耕.png` | 待生成 |
 | 许显纯 | `minister_许显纯.png` | 待生成 |

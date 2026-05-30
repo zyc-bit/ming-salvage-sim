@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Tuple
 from ming_sim.agents import bind_content as _bind_agents, create_memory_retrieval_agent
 from ming_sim.agents import parse_agent_json, run_agent_text
 from ming_sim.communications import communication_days, date_after_days
+from ming_sim.constants import ISSUE_CRISIS_BAR, STATE_RED_LINES
 from ming_sim.content import GameContent
 from ming_sim.context import (
     bind_content as _bind_context,
@@ -1072,16 +1073,28 @@ class GameSession:
         """兼容旧 CLI：普通退朝至明日；每日跑日终结算。"""
         self.end_day()
 
-    def end_day(self, on_event=None) -> str:
-        """退朝至明日；每日结算推演，第 30 日只额外生成月末总结。"""
+    def end_day(self, on_event=None) -> Tuple[str, List[Dict[str, object]]]:
+        """退朝至明日；每日结算推演，第 30 日额外生成月末总结。
+
+        返回 (邸报, 今日警讯)。警讯非空表示有需皇帝亲自御断之事，
+        前端据以暂停「自动临朝」——模拟皇帝只在大事抵达御前时驻足。
+        """
         if self.pending_count() > 0:
             raise ValueError(f"尚有 {self.pending_count()} 道大臣拟旨待陛下核定（准/驳），不能退朝。")
         draft_count = len(self.db.list_directives(self.state, statuses=("draft",)))
         if draft_count:
             raise ValueError(f"尚有 {draft_count} 道诏书草案未颁布或删除，不能退朝。")
         self.auto_save("endday")
-        self.process_arrived_dispatches(on_event=on_event)
-        report = resolve_day_end(
+        # 结算前快照：供 _collect_alerts 比对，识别「本日抵达御前」之事
+        before_metrics = dict(self.state.metrics)
+        before_issues = {
+            int(r["id"]): (int(r["bar_value"]), str(r["status"]))
+            for r in self.db.list_active_issues()
+        }
+        before_pending_ids = {o["id"] for o in self.db.list_secret_orders(status="pending_review")}
+        settle_turn = int(self.state.turn)
+        processed: List[Dict[str, object]] = list(self.process_arrived_dispatches(on_event=on_event) or [])
+        report, applied = resolve_day_end(
             self.state,
             self.db,
             self.agno_db,
@@ -1092,7 +1105,8 @@ class GameSession:
             content=self.content,
             registry=self.registry,
         )
-        if int(self.state.day) >= 30:
+        month_end = int(self.state.day) >= 30
+        if month_end:
             report = resolve_month_summary(
                 self.state,
                 self.db,
@@ -1104,10 +1118,105 @@ class GameSession:
         self.last_report = report
         self.state.next_day()
         self.db.save_state(self.state)
-        self.process_arrived_dispatches(on_event=on_event)
+        processed += list(self.process_arrived_dispatches(on_event=on_event) or [])
         self.state.turn_phase = TurnPhase.SUMMONING.value
         self.db.save_state(self.state)
-        return report
+        alerts = self._collect_alerts(
+            before_metrics, before_issues, before_pending_ids,
+            applied, processed, settle_turn, month_end,
+        )
+        return report, alerts
+
+    def _collect_alerts(
+        self,
+        before_metrics: Dict[str, int],
+        before_issues: Dict[int, Tuple[int, str]],
+        before_pending_ids: set,
+        applied: Dict[str, object],
+        processed: List[Dict[str, object]],
+        settle_turn: int,
+        month_end: bool,
+    ) -> List[Dict[str, object]]:
+        """汇总本日「抵达御前、需皇帝御断」之事，供前端暂停自动流逝。
+
+        模拟崇祯视角：日常庶务自动流过，唯急报（下属回报/诏书回奏/大臣回奏/
+        新晋局势/局势告急/国计骤危）、月终大计、终局方惊动御前。
+        """
+        alerts: List[Dict[str, object]] = []
+
+        def _add(kind, category, title, summary, ref_kind, ref_id):
+            alerts.append({
+                "type": kind,
+                "category": category,
+                "title": str(title).strip(),
+                "summary": str(summary).strip(),
+                "ref": {"kind": ref_kind, "id": int(ref_id)},
+            })
+
+        # 1) 锦衣卫/密令办毕回报待裁（新转 pending_review）
+        after_pending = {o["id"]: o for o in self.db.list_secret_orders(status="pending_review")}
+        for oid in sorted(set(after_pending) - before_pending_ids):
+            o = after_pending[oid]
+            who = str(o.get("minister_name") or "所遣之人")
+            _add("secret_order", "急报", f"密令回报待裁：{o.get('title') or ''}",
+                 f"{who}已办毕复命，呈结果候陛下裁夺。", "secret_order", oid)
+
+        # 2/3) 本日抵京的派遣回报：诏书即时回奏 / 大臣回奏
+        for p in processed:
+            pk = str(p.get("kind") or "")
+            if pk == "decree" and int(p.get("court_event_id") or 0) > 0:
+                _add("decree_reply", "急报", "诏书送达·地方回奏",
+                     "所颁诏书已抵地方，有即时回奏呈御。", "court_event", int(p.get("court_event_id") or 0))
+            elif pk == "letter_reply":
+                _add("minister_reply", "急报", "大臣回奏抵京",
+                     "远遣之臣有回奏抵达，候陛下御览。", "dispatch", int(p.get("id") or 0))
+
+        # 5/7) 新晋外界局势（预设事件触发的 situation；玩家诏书发起的工程不报）
+        issue_summary = applied.get("issue_summary") if isinstance(applied, dict) else None
+        for ni in (issue_summary or {}).get("new_issues", []) or []:
+            if ni.get("rejected") or str(ni.get("kind")) != "situation":
+                continue
+            _add("situation", "急报", f"新晋局势：{ni.get('title') or ''}",
+                 "地方边关有新报抵达，亟待陛下裁处。", "issue", int(ni.get("issue_id") or 0))
+
+        # 4/5) 既存局势告急（situation：在办者 bar 跌破危线，或已崩坏 failed）
+        after_active = {int(r["id"]): r for r in self.db.list_active_issues()}
+        after_closed = {int(r["id"]): r for r in self.db.list_closed_issues_at(settle_turn)}
+        for iid, (bbar, _bstatus) in before_issues.items():
+            row = after_active.get(iid)
+            if row is not None:
+                if str(row["kind"]) != "situation":
+                    continue
+                abar = int(row["bar_value"])
+                if bbar > ISSUE_CRISIS_BAR >= abar:
+                    _add("issue_worsen", "急报", f"局势告急：{row['title']}",
+                         f"{row['title']}急转直下，已临危局。", "issue", iid)
+            else:
+                closed = after_closed.get(iid)
+                if closed is not None and str(closed["status"]) == "failed" and str(closed["kind"]) == "situation":
+                    _add("issue_worsen", "急报", f"局势崩坏：{closed['title']}",
+                         f"{closed['title']}终至不可收拾。", "issue", iid)
+
+        # 6) 国计骤危（metrics 下穿红线）
+        after_metrics = self.state.metrics
+        for key, line in STATE_RED_LINES.items():
+            bv = int(before_metrics.get(key, 0))
+            av = int(after_metrics.get(key, 0))
+            if bv > line >= av:
+                _add("metric_redline", "急报", f"{key}告急",
+                     f"{key}跌破危线（{bv}→{av}），社稷可忧。", "metric", 0)
+
+        # 9) 终局（亡国 / 中兴）
+        outcome = (applied.get("victory_status") if isinstance(applied, dict) else None) or victory_status(self.db, self.state)
+        if isinstance(outcome, dict) and outcome.get("status") not in (None, "", "ongoing"):
+            _add("ending", "急报", "国运抵定", str(outcome.get("summary") or ""), "ending", 0)
+
+        # 8) 月终大计（朝会复盘）
+        if month_end:
+            _add("month_end", "朝会", "月终大计",
+                 "本月已毕，邸报、成败、起复讣闻俱已呈览，请陛下临朝复盘。", "month", 0)
+
+        return alerts
 
     def victory(self) -> Dict[str, object]:
         return victory_status(self.db, self.state)

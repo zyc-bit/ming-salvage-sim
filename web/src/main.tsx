@@ -264,7 +264,8 @@ type GameState = {
 type ChatMessage = { role: "user" | "minister"; content: string };
 type ChatDisplayMessage = ChatMessage & { pending?: boolean };
 type Suggestion = { label: string; text: string; prefix?: boolean };
-type ModalName = "none" | "state" | "chat" | "edict" | "report" | "extraction" | "history" | "menu" | "secret_orders";
+type ModalName = "none" | "state" | "chat" | "edict" | "report" | "extraction" | "history" | "menu" | "secret_orders" | "alerts";
+type Alert = { type: string; category: string; title: string; summary: string; ref: { kind: string; id: number } };
 type SaveEntry = { name: string; size: number; mtime: number };
 type LLMConfigInfo = {
   base_url: string;
@@ -628,6 +629,11 @@ function App() {
   const [gazetteShown, setGazetteShown] = React.useState<number>(-1);
   const [secretOrders, setSecretOrders] = React.useState<SecretOrder[]>([]);
   const [secretOrderShown, setSecretOrderShown] = React.useState<number>(-1);
+  // 自动临朝（时间自动流逝）：autoPlayRef 供 endDay 异步循环即时读最新值，避免闭包旧值
+  const [autoPlay, setAutoPlay] = React.useState(false);
+  const autoPlayRef = React.useRef(false);
+  const setAuto = React.useCallback((v: boolean) => { autoPlayRef.current = v; setAutoPlay(v); }, []);
+  const [alertModal, setAlertModal] = React.useState<Alert[]>([]);
 
   const loadState = React.useCallback(async () => {
     const data = await api<GameState>("/api/game/state");
@@ -695,6 +701,7 @@ function App() {
     if (!state) return;
     const closed = state.closed_this_turn || [];
     const currentTurn = state.turn.turn;
+    if (autoPlayRef.current) { setClosedShown(currentTurn); return; }
     if (closed.length && currentTurn !== closedShown) {
       setClosedModal(closed);
       setClosedShown(currentTurn);
@@ -710,7 +717,7 @@ function App() {
     api<{ orders: SecretOrder[] }>("/api/secret_orders")
       .then(({ orders }) => {
         setSecretOrders(orders);
-        if (orders.some(o => o.status === "in_transit" || o.status === "active" || o.status === "pending_review")) {
+        if (!autoPlayRef.current && orders.some(o => o.status === "in_transit" || o.status === "active" || o.status === "pending_review")) {
           // 延迟 400ms，避免与邸报弹窗争抢
           setTimeout(() => setActiveModal("secret_orders"), 400);
         }
@@ -729,7 +736,7 @@ function App() {
     if (summary.startsWith("登基伊始")) return;
     if (currentTurn === gazetteShown) return;
     setGazetteReport(summary);
-    setActiveModal("report");
+    if (!autoPlayRef.current) setActiveModal("report");
     setGazetteShown(currentTurn);
   }, [state, gazetteShown]);
 
@@ -1109,8 +1116,8 @@ function App() {
     }
   };
 
-  const endDay = async () => {
-    if (busy) return;
+  const endDay = async (opts?: { auto?: boolean }) => {
+    if (busy && !opts?.auto) return;
     setBusy(state.month_end_due ? "月末总结" : "日终退朝");
     setSettleStage("");
     setSettleThinking("");
@@ -1159,6 +1166,7 @@ function App() {
         }
       }
       if (failed) {
+        setAuto(false);
         setError(failed);
         setBusy("");
         return;
@@ -1168,11 +1176,26 @@ function App() {
         setReport(donePayload.report || "");
         if (donePayload.report) setGazetteReport(donePayload.report);
       } else {
+        // 未拿到 done（断流/异常）：停止自动临朝，回拉状态
+        setAuto(false);
         await loadState();
       }
-      setActiveModal("none");
-      setBusy("");
+      const dayAlerts: Alert[] = (donePayload?.alerts as Alert[]) || [];
+      if (dayAlerts.length > 0) {
+        // 有军国大事抵达御前 → 停自动临朝，召开「今日急报」请陛下御断
+        setAuto(false);
+        setAlertModal(dayAlerts);
+        setActiveModal("alerts");
+        setBusy("");
+      } else if (autoPlayRef.current && donePayload?.state) {
+        // 无急报且自动临朝中 → 续推下一日（busy 持续显示结算态）
+        setTimeout(() => { endDay({ auto: true }); }, 0);
+      } else {
+        setActiveModal("none");
+        setBusy("");
+      }
     } catch (err) {
+      setAuto(false);
       setError(err instanceof Error ? err.message : String(err));
       setBusy("");
     }
@@ -1205,6 +1228,15 @@ function App() {
         onOpenSecretOrders={() => setActiveModal("secret_orders")}
         onEndDay={() => endDay()}
         monthEndDue={state.month_end_due}
+        autoPlay={autoPlay}
+        onToggleAuto={() => {
+          if (autoPlayRef.current) {
+            setAuto(false);
+          } else {
+            setAuto(true);
+            if (!busy) endDay({ auto: true });
+          }
+        }}
       />
 
       <CourtDrawer
@@ -1341,14 +1373,34 @@ function App() {
         />
       ) : null}
 
-      {settling ? (
-        <SettlementLock
-          title={busy === "颁诏即时回奏" ? "即时回奏中" : busy === "月末总结" ? "月末总结中" : "日终退朝中"}
-          narrativeLabel={busy === "颁诏即时回奏" ? "即时奏疏" : busy === "月末总结" ? "月末总结" : "日终奏报"}
-          stage={settleStage}
-          thinking={settleThinking}
-          narrative={settleNarrative}
+      {activeModal === "alerts" ? (
+        <AlertConvocationModal
+          alerts={alertModal}
+          onResolve={(a) => {
+            const k = a.ref.kind;
+            setActiveModal(k === "secret_order" ? "secret_orders" : (k === "dispatch" || k === "court_event") ? "history" : "state");
+          }}
+          onContinue={() => {
+            setActiveModal("none");
+            setAuto(true);
+            endDay({ auto: true });
+          }}
+          onClose={() => setActiveModal("none")}
         />
+      ) : null}
+
+      {settling ? (
+        autoPlay ? (
+          <AutoPlayBanner turn={state.turn} onPause={() => setAuto(false)} />
+        ) : (
+          <SettlementLock
+            title={busy === "颁诏即时回奏" ? "即时回奏中" : busy === "月末总结" ? "月末总结中" : "日终退朝中"}
+            narrativeLabel={busy === "颁诏即时回奏" ? "即时奏疏" : busy === "月末总结" ? "月末总结" : "日终奏报"}
+            stage={settleStage}
+            thinking={settleThinking}
+            narrative={settleNarrative}
+          />
+        )
       ) : null}
     </main>
   );
@@ -2039,6 +2091,66 @@ function BudgetList({ title, items, expense = false }: { title: string; items: B
   );
 }
 
+function AutoPlayBanner({ turn, onPause }: { turn: GameState["turn"]; onPause: () => void }) {
+  return (
+    <div role="status" style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 60, display: "flex", alignItems: "center", justifyContent: "center", gap: 16, padding: "10px 16px", background: "rgba(20,16,12,0.92)", color: "#f3e7c9", fontSize: 15, letterSpacing: 1 }}>
+      <span>⏳ 自动临朝中 · {turn.year}年{turn.period}月{turn.day}日，正结算……</span>
+      <button onClick={onPause} style={{ padding: "4px 14px", cursor: "pointer" }}>暂停（本日毕即停）</button>
+    </div>
+  );
+}
+
+function AlertConvocationModal({
+  alerts,
+  onResolve,
+  onContinue,
+  onClose,
+}: {
+  alerts: Alert[];
+  onResolve: (a: Alert) => void;
+  onContinue: () => void;
+  onClose: () => void;
+}) {
+  const urgent = alerts.filter((a) => a.category === "急报");
+  const court = alerts.filter((a) => a.category !== "急报");
+  const renderItem = (a: Alert, i: number) => (
+    <li key={`${a.type}-${a.ref.kind}-${a.ref.id}-${i}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: "1px solid rgba(160,130,80,0.25)" }}>
+      <div>
+        <div style={{ fontWeight: 600 }}>{a.title}</div>
+        <div style={{ opacity: 0.8, fontSize: 13 }}>{a.summary}</div>
+      </div>
+      <button onClick={() => onResolve(a)} style={{ whiteSpace: "nowrap", padding: "4px 12px", cursor: "pointer" }}>前往处置</button>
+    </li>
+  );
+  return (
+    <FullscreenModal
+      title="今日急报"
+      subtitle="军国大事上达御前，请陛下裁处"
+      onClose={onClose}
+      headerExtra={<button onClick={onContinue} style={{ padding: "6px 16px", cursor: "pointer" }}>继续临朝</button>}
+    >
+      <div style={{ padding: "8px 4px" }}>
+        {urgent.length > 0 ? (
+          <>
+            <h3 style={{ margin: "8px 0" }}>急报 · 即时上达</h3>
+            <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>{urgent.map(renderItem)}</ul>
+          </>
+        ) : null}
+        {court.length > 0 ? (
+          <>
+            <h3 style={{ margin: "16px 0 8px" }}>朝会 · 复盘</h3>
+            <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>{court.map(renderItem)}</ul>
+          </>
+        ) : null}
+        <div style={{ marginTop: 20, display: "flex", gap: 12, justifyContent: "flex-end" }}>
+          <button onClick={onClose} style={{ padding: "8px 18px", cursor: "pointer" }}>留朝处置</button>
+          <button onClick={onContinue} style={{ padding: "8px 18px", cursor: "pointer" }}>继续临朝</button>
+        </div>
+      </div>
+    </FullscreenModal>
+  );
+}
+
 function BottomCommandBar({
   eventsCount,
   directivesCount,
@@ -2050,6 +2162,8 @@ function BottomCommandBar({
   onOpenHistory,
   onOpenSecretOrders,
   onEndDay,
+  autoPlay,
+  onToggleAuto,
 }: {
   eventsCount: number;
   directivesCount: number;
@@ -2061,6 +2175,8 @@ function BottomCommandBar({
   onOpenHistory: () => void;
   onOpenSecretOrders: () => void;
   onEndDay: () => void;
+  autoPlay: boolean;
+  onToggleAuto: () => void;
 }) {
   return (
     <nav className="bottom-command-bar" aria-label="朝政主操作">
@@ -2090,6 +2206,10 @@ function BottomCommandBar({
       <button className="command-icon" onClick={onEndDay} aria-label={monthEndDue ? "日终退朝并生成月末总结" : "日终退朝"}>
         <img src="/icon_seal.png" alt="" className="command-art" />
         <span className="command-caption"><b>{monthEndDue ? "月末总结" : "退朝"}</b><small>{monthEndDue ? "日结+总结" : "日终结算"}</small></span>
+      </button>
+      <button className="command-icon" onClick={onToggleAuto} aria-label={autoPlay ? "暂停自动临朝" : "自动临朝（时间自动流逝）"}>
+        <img src="/icon_seal.png" alt="" className="command-art" />
+        <span className="command-caption"><b>{autoPlay ? "暂停临朝" : "自动临朝"}</b><small>{autoPlay ? "本日毕即停" : "时光自流·遇事即停"}</small></span>
       </button>
     </nav>
   );

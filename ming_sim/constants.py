@@ -17,6 +17,12 @@ MONEY_UNIT = "万两"
 ECONOMY_ACCOUNTS = ("国库", "内库")
 SCORE_METRICS = ("民心", "皇威")
 
+# 国势红线：metrics 由「线上」单日跌破「线下」即触发当日急报（仅下穿瞬间报一次）。
+# 供 GameSession.end_day 采集「今日警讯」判定，模拟「国计骤危上达天听」。
+STATE_RED_LINES = {"国库": 60, "内库": 40, "民心": 30, "皇威": 15}
+# 局势(issue)恶化危线：situation 类 bar_value 由「线上」跌破即报「局势告急」。
+ISSUE_CRISIS_BAR = 20
+
 # 一回合的时段单位字。改此处即可全局切换回合语义（月/旬/季）；
 # prompts 用占位符 {{TURN_UNIT}}，代码渲染用 TURN_UNIT 变量。
 TURN_UNIT = "月"

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from agno.db.sqlite import SqliteDb
 
@@ -317,7 +317,7 @@ def resolve_day_end(
     on_event: Optional[Callable[[str, str], None]] = None,
     content=None,
     registry=None,
-) -> str:
+) -> Tuple[str, dict]:
     """每日退朝结算：固定日额 + 当日自然推进 + 到期密令 + 当日奏报。
 
     本函数只结算当前日期，不推进 state.turn/date；日期推进由 GameSession.end_day 统一处理。
@@ -423,7 +423,7 @@ def resolve_day_end(
         apply_issue_inertia_and_ongoing(db, state, touched_ids=set(), period_days=30)
         db.save_state(state)
         assert state.turn == before_turn
-        return narrative
+        return narrative, {}
 
     tlog("日终 3/4 结算 agent（抽 JSON）")
     _emit("stage", "日终数值结算")
@@ -495,7 +495,7 @@ def resolve_day_end(
 
     db.save_state(state)
     assert state.turn == before_turn
-    return narrative
+    return narrative, applied
 
 
 def resolve_month_summary(

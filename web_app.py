@@ -1526,10 +1526,11 @@ async def api_end_day_stream() -> StreamingResponse:
 
     def worker() -> None:
         try:
-            report = get_game().session.end_day(on_event=on_event)
+            report, alerts = get_game().session.end_day(on_event=on_event)
             get_game().refresh_turn()
             ev_queue.put(("__done__", {
                 "report": report,
+                "alerts": alerts,
                 "state": get_game().state_payload(),
             }))
         except ValueError as e:
