@@ -105,13 +105,91 @@ def _apply_issue_buildings(
     return applied
 
 
-def _apply_terminal_effect(db: GameDB, state: GameState, effect: Dict[str, object], reason: str) -> List[Dict[str, object]]:
+def _legacy_duration_months(raw: object) -> int:
+    if raw is None:
+        return 24
+    text = str(raw).strip()
+    if text in ("永久", "permanent", "-1"):
+        return -1
+    if text.endswith("年"):
+        try:
+            return int(text[:-1]) * 12
+        except ValueError:
+            return 24
+    try:
+        return int(text)
+    except ValueError:
+        return 24
+
+
+def _spawn_legacy_from_effect(
+    db: GameDB,
+    state: GameState,
+    effect: Dict[str, object],
+    source_issue_id: int | None = None,
+) -> None:
+    raw = effect.get("legacy") or effect.get("帝国修正")
+    items = raw if isinstance(raw, list) else [raw]
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("名称") or "").strip()
+        modifiers = item.get("modifiers") or item.get("修正") or {}
+        if not name or not isinstance(modifiers, dict) or not modifiers:
+            continue
+        db.insert_legacy(
+            state,
+            name=name,
+            modifiers=modifiers,
+            narrative_hint=str(item.get("narrative_hint") or item.get("叙事提示") or ""),
+            duration_months=_legacy_duration_months(item.get("duration") or item.get("时长")),
+            source_issue_id=source_issue_id,
+            clear_gate=item.get("clear_gate") if isinstance(item.get("clear_gate"), dict) else None,
+        )
+
+
+def _apply_terminal_effect(
+    db: GameDB,
+    state: GameState,
+    effect: Dict[str, object],
+    reason: str,
+    source_issue_id: int | None = None,
+) -> List[Dict[str, object]]:
     """局势 resolved/failed 终结效果一锤子落地：metrics + economy + factions + buildings。
     返回建筑操作列表（close 处需要；advance/inertia 处忽略）。"""
-    _apply_metric_dict(state, effect.get("metrics") or {})
+    _apply_metric_dict(state, effect.get("metrics") or {}, db=db)
     _apply_economy_list(db, state, effect.get("economy") or [])
     _apply_faction_dict(db, effect.get("factions") or {})
+    _spawn_legacy_from_effect(db, state, effect, source_issue_id=source_issue_id)
     return _apply_issue_buildings(db, state, effect.get("buildings"), _ISSUE_PSEUDO_EVENT, reason)
+
+
+def _merge_terminal_effect(base: Dict[str, object], extra: object) -> Dict[str, object]:
+    if not isinstance(extra, dict) or not extra:
+        return base
+    merged = dict(base or {})
+    for key, val in extra.items():
+        if key in ("metrics", "factions") and isinstance(val, dict):
+            cur = merged.get(key)
+            if not isinstance(cur, dict):
+                cur = {}
+            for sub_key, sub_val in val.items():
+                try:
+                    cur[str(sub_key)] = int(cur.get(str(sub_key), 0) or 0) + int(sub_val)
+                except (TypeError, ValueError):
+                    cur[str(sub_key)] = sub_val
+            merged[key] = cur
+        elif key in ("economy", "buildings") and isinstance(val, list):
+            cur_list = merged.get(key)
+            merged[key] = (cur_list if isinstance(cur_list, list) else []) + val
+        elif key in ("legacy", "帝国修正"):
+            cur_legacy = merged.get("legacy")
+            cur_items = cur_legacy if isinstance(cur_legacy, list) else ([cur_legacy] if isinstance(cur_legacy, dict) else [])
+            new_items = val if isinstance(val, list) else ([val] if isinstance(val, dict) else [])
+            merged["legacy"] = cur_items + new_items
+        else:
+            merged[key] = val
+    return merged
 
 
 def issue_to_payload(row: sqlite3.Row, recent_advances: List[sqlite3.Row]) -> Dict[str, object]:
@@ -184,6 +262,7 @@ def _eval_gate_key(key: str, metrics: Dict[str, int], db: GameDB) -> Optional[in
       - 'army.<id>.<field>' / 多军 + agg
       - 'building.<id>.<field>' / 多建筑 + agg
       - 'power.<id>.<field>' / 多 + agg
+      - 'faction.<name>.<field>'                → factions 表
       - 'class.<name>.<field>'                  → classes 表全国汇总 (region_id='')
       - 'class.<name>@<region>.<field>'         → classes 表省级
       - 'class.<name>@<r1>|<r2>|.<field>.<agg>' → 多省同阶级聚合
@@ -195,7 +274,7 @@ def _eval_gate_key(key: str, metrics: Dict[str, int], db: GameDB) -> Optional[in
         return None
     parts = key.split(".")
     table = parts[0]
-    if table not in ("region", "army", "building", "power", "class"):
+    if table not in ("region", "army", "building", "power", "faction", "class"):
         return None
     # 末段可能是 agg，先抽出
     agg = None
@@ -227,6 +306,8 @@ def _eval_gate_key(key: str, metrics: Dict[str, int], db: GameDB) -> Optional[in
             row = db.conn.execute(f"SELECT {field} FROM buildings WHERE id = ?", (cid,)).fetchone()
         elif table == "power":
             row = db.conn.execute(f"SELECT {field} FROM powers WHERE id = ?", (cid,)).fetchone()
+        elif table == "faction":
+            row = db.conn.execute(f"SELECT {field} FROM factions WHERE name = ?", (cid,)).fetchone()
         elif table == "class":
             if "@" in cid:
                 cname, rid = cid.split("@", 1)
@@ -252,15 +333,49 @@ def _eval_gate_key(key: str, metrics: Dict[str, int], db: GameDB) -> Optional[in
     return _GATE_AGG_FUNCS[agg](values)
 
 
+def _eval_gate_key_text(key: str, db: GameDB) -> Optional[str]:
+    if "." not in key:
+        return None
+    parts = key.split(".")
+    table = parts[0]
+    if table not in ("region", "army", "building", "power", "faction"):
+        return None
+    if len(parts) < 3:
+        return None
+    field = parts[-1]
+    id_segment = ".".join(parts[1:-1])
+    if "|" in id_segment:
+        return None
+    if table == "region":
+        row = db.conn.execute(f"SELECT {field} FROM regions WHERE id = ?", (id_segment,)).fetchone()
+    elif table == "army":
+        row = db.conn.execute(f"SELECT {field} FROM armies WHERE id = ?", (id_segment,)).fetchone()
+    elif table == "building":
+        row = db.conn.execute(f"SELECT {field} FROM buildings WHERE id = ?", (id_segment,)).fetchone()
+    elif table == "power":
+        row = db.conn.execute(f"SELECT {field} FROM powers WHERE id = ?", (id_segment,)).fetchone()
+    else:
+        row = db.conn.execute(f"SELECT {field} FROM factions WHERE name = ?", (id_segment,)).fetchone()
+    return str(row[0]) if row is not None else None
+
+
 def _gate_passed(gate: Dict[str, str], metrics: Dict[str, int], db: GameDB) -> bool:
     """trigger_gate 全部条件满足才返回 True。条件形如 '<=240'。
     key 形式见 _eval_gate_key。
     """
     for key, cond in gate.items():
-        m = re.match(r"^(>=|<=|>|<|==)\s*(-?\d+)$", cond.strip())
+        m = re.match(r"^(>=|<=|>|<|==)\s*(.+)$", cond.strip())
         if not m:
             return False
-        op, num = m.group(1), int(m.group(2))
+        op, rhs = m.group(1), m.group(2).strip()
+        if op == "==" and not re.match(r"^-?\d+$", rhs):
+            text_val = _eval_gate_key_text(key, db)
+            if text_val != rhs:
+                return False
+            continue
+        if not re.match(r"^-?\d+$", rhs):
+            return False
+        num = int(rhs)
         val = _eval_gate_key(key, metrics, db)
         if val is None:
             return False
@@ -275,6 +390,60 @@ def _gate_passed(gate: Dict[str, str], metrics: Dict[str, int], db: GameDB) -> b
         if op == "==" and not val == num:
             return False
     return True
+
+
+def sync_opening_legacies(db: GameDB, state: GameState) -> None:
+    """把 content/opening_legacies.json 中尚未解除的开局结构性包袱补进存档。"""
+    for legacy in _ctx().opening_legacies:
+        row = db.conn.execute(
+            "SELECT id, status FROM legacies WHERE legacy_key=? ORDER BY id DESC LIMIT 1",
+            (legacy.key,),
+        ).fetchone()
+        if row is not None and str(row["status"]) == "active":
+            if legacy.clear_gate and _gate_passed(legacy.clear_gate, state.metrics, db):
+                db.conn.execute(
+                    "UPDATE legacies SET status='cleared', updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (int(row["id"]),),
+                )
+                db.conn.commit()
+                db._invalidate_legacy_cache()
+            continue
+        if row is not None and str(row["status"]) == "cleared":
+            continue
+        if legacy.clear_gate and _gate_passed(legacy.clear_gate, state.metrics, db):
+            continue
+        db.insert_legacy(
+            state,
+            name=legacy.name,
+            modifiers=legacy.modifiers,
+            narrative_hint=legacy.narrative_hint,
+            duration_months=-1,
+            clear_gate=legacy.clear_gate,
+            legacy_key=legacy.key,
+        )
+
+
+def clear_gated_legacies(db: GameDB, state: GameState) -> List[str]:
+    cleared: List[str] = []
+    for row in db.list_active_legacies(state):
+        try:
+            gate = json.loads(row["clear_gate"] or "{}")
+        except Exception:
+            gate = {}
+        if not isinstance(gate, dict) or not gate:
+            continue
+        if not _gate_passed(gate, state.metrics, db):
+            continue
+        db.conn.execute(
+            "UPDATE legacies SET status='cleared', updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (int(row["id"]),),
+        )
+        cleared.append(str(row["name"]))
+    if cleared:
+        db.conn.commit()
+        db._invalidate_legacy_cache()
+        db.record_log(state, "帝国修正解除：" + "、".join(cleared))
+    return cleared
 
 
 def gather_candidate_events(state: GameState, db: GameDB) -> List[Event]:
@@ -521,7 +690,7 @@ def apply_issue_tracker_output(
         stage_text = str(adv.get("stage_text") or "")[:120]
         narrative = str(adv.get("narrative") or "")[:400]
         metric_delta_raw = adv.get("metric_delta") or {}
-        applied_metrics = _apply_metric_dict(state, metric_delta_raw if isinstance(metric_delta_raw, dict) else {})
+        applied_metrics = _apply_metric_dict(state, metric_delta_raw if isinstance(metric_delta_raw, dict) else {}, db=db)
         new_row = db.advance_issue(
             state, issue_id,
             trigger_kind="decree",
@@ -537,10 +706,10 @@ def apply_issue_tracker_output(
         # 终结结算：bar 自然推到 100/0 触发的 resolved/failed，与 close_issues 一样落终结效果（含建筑）
         if new_row["status"] == "resolved":
             effect = json.loads(new_row["effect_on_resolve"] or "{}")
-            _apply_terminal_effect(db, state, effect, f"局势#{issue_id}结案")
+            _apply_terminal_effect(db, state, effect, f"局势#{issue_id}结案", source_issue_id=issue_id)
         elif new_row["status"] == "failed":
             effect = json.loads(new_row["effect_on_fail"] or "{}")
-            _apply_terminal_effect(db, state, effect, f"局势#{issue_id}失败")
+            _apply_terminal_effect(db, state, effect, f"局势#{issue_id}失败", source_issue_id=issue_id)
         applied_advances.append({
             "issue_id": issue_id,
             "title": new_row["title"],
@@ -639,10 +808,13 @@ def apply_issue_tracker_output(
         # 终结效果
         if reason == "resolved":
             effect = json.loads(new_row["effect_on_resolve"] or "{}")
+            effect = _merge_terminal_effect(effect, cl.get("effect_on_resolve") or {})
         else:
             effect = json.loads(new_row["effect_on_fail"] or "{}")
+            effect = _merge_terminal_effect(effect, cl.get("effect_on_fail") or {})
         building_ops = _apply_terminal_effect(
             db, state, effect, f"局势#{issue_id}{'结案' if reason == 'resolved' else '失败'}",
+            source_issue_id=issue_id,
         )
         applied_closes.append({
             "issue_id": issue_id,
@@ -678,7 +850,7 @@ def apply_issue_tracker_output(
         # 可撤：应用 applied_cost
         cost = cn.get("applied_cost") or {}
         if isinstance(cost, dict):
-            _apply_metric_dict(state, cost.get("metrics") or {})
+            _apply_metric_dict(state, cost.get("metrics") or {}, db=db)
             _apply_economy_list(db, state, cost.get("economy") or [])
             _apply_faction_dict(db, cost.get("factions") or {})
         db.cancel_issue(
@@ -755,7 +927,7 @@ def apply_score_extraction(
     content/registry：若传入则处理 `appointments`——把诏书任命的新人建档入朝。
     缺省则跳过（向后兼容老调用）。"""
     # 1) metric_delta
-    applied_metric = _apply_metric_dict(state, extracted.get("metric_delta") or {})
+    applied_metric = _apply_metric_dict(state, extracted.get("metric_delta") or {}, db=db)
     # 2) economy_moves
     applied_economy = _apply_economy_list(db, state, extracted.get("economy_moves") or [])
     # 3) faction_delta + class_delta（朝堂派系 + 社会阶级；联动靠 LLM，不在代码做）
@@ -1138,11 +1310,11 @@ def apply_issue_inertia_and_ongoing(
                     continue
                 if new_row["status"] == "resolved":
                     effect = json.loads(new_row["effect_on_resolve"] or "{}")
-                    _apply_terminal_effect(db, state, effect, f"局势#{issue_id}结案")
+                    _apply_terminal_effect(db, state, effect, f"局势#{issue_id}结案", source_issue_id=issue_id)
                     continue
                 elif new_row["status"] == "failed":
                     effect = json.loads(new_row["effect_on_fail"] or "{}")
-                    _apply_terminal_effect(db, state, effect, f"局势#{issue_id}失败")
+                    _apply_terminal_effect(db, state, effect, f"局势#{issue_id}失败", source_issue_id=issue_id)
                     continue
                 row = db.conn.execute("SELECT * FROM issues WHERE id=?", (issue_id,)).fetchone()
                 if row is None:

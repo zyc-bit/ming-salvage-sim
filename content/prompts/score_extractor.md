@@ -124,7 +124,7 @@
 | `issue_advances` | 既有局势本{{TURN_UNIT}}推进 | 每项 `issue_id`(必须是 active_issues 里的 integer id)+`delta_bar`+`stage_text`+`narrative`，可选 `inertia_delta`。`delta_bar` 是皇帝本{{TURN_UNIT}}实旨推动的额外量，与 issue 每{{TURN_UNIT}}自然漂移 inertia 叠加。详见「局势推进规则」。 |
 | `new_issues` | 本{{TURN_UNIT}}新立局势 | 仅两来源：`decree`（带全字段）/`event_pool`（只带 `origin_kind`+`id`）。详见「局势立项规则」。 |
 | `cancels` | 皇帝撤销的局势 | 每项 `issue_id`+`applied_cost`+`narrative`。详见「局势推进规则·撤销」。 |
-| `close_issues` | 本{{TURN_UNIT}}结案/失败的局势 | 每项 `issue_id`+`reason`(`resolved`/`failed`)+`narrative`。详见「局势推进规则·结案」。 |
+| `close_issues` | 本{{TURN_UNIT}}结案/失败的局势 | 每项 `issue_id`+`reason`(`resolved`/`failed`)+`narrative`，可选 `effect_on_resolve`/`effect_on_fail` 补充稀有 `legacy`/`帝国修正`。详见「局势推进规则·结案」。 |
 | `fiscal_changes` | 制度性财政系数变化 | 仅奏章明确提到开征新税/削减禄米/盐政改革等才写。`delta` 是增量（±5~±30 常规，±50 极端）。`key` 必须从下方「财政系数表」选，不在表内一律不写。 |
 | `appointments` | **仅后宫纳妃** | 仅 `decree_text` 写明「纳/册封/封/选 某某 为 贵妃/嫔/才人/昭仪/婕妤/淑女」时立项。每项 `{"name","office","office_type":"后宫","reason","approved"}`，详见「后宫纳妃规则」。**朝臣任命不进此字段，一律走 `office_changes`。** |
 | `character_status_changes` | 既有大臣状态变更（罢黜/下狱/流放/致仕/死亡） | 邸报明文写「某某革职/拿问/下诏狱/赐死/缢死/流放/致仕/卒」时立项。每项 `{"name","status","reason"}`，status ∈ `dismissed`/`imprisoned`/`exiled`/`retired`/`dead`/`offstage`。详见「人物状态变更规则」。 |
@@ -133,7 +133,7 @@
 | `secret_order_updates` | 进行中密令的副作用 | **专扫邸报「密旨动向」章**，逐条对照 `secret_orders` 列表（以 `id` 匹配承办人+标题）。凡该章写到某 `active` 密令引发的副作用，抽一条：`order_id` 取 `secret_orders[].id`（正整数）、`sim_note` 写该副作用核心事实（50字内，如「风声走漏，魏党已有警觉」「牵连扬州盐商，士绅不安」）。**只抽 `active` 密令的副作用——`pending_review` 走 `secret_order_closes`，`done/failed` 不再动**。「密旨动向」章无内容则留空数组。 |
 | `secret_order_closes` | 待核议密令的结案判定 | **专扫邸报「密旨核议」小节**，逐条对照 `secret_orders` 中 `status=pending_review` 的密令。每条 pending_review 密令邸报必给一判，抽一条：`order_id` 取 `secret_orders[].id`（正整数）、`status` ∈ `done`/`failed`（**二选一，不存在续办**）、`result` 写推演判定的核实结论（100字内，将作为日后下诏拿人定罪的实据）。`done`：实据齐全 + 承办人如实呈交；`failed`：任务不可行/虚报/反扑/事泄/证据残缺。若邸报「密旨核议」小节无内容（无 pending_review 密令）则留空数组。 |
 
-new_issue 内部字段：`kind`(`initiative`/`situation`)、`title`、`origin_kind`、`bar_value`(0-100 初始进度)、`expected_months`、`stage_text`、`resolve_condition`、`fail_condition`、`ongoing_effects`、`effect_on_resolve`、`effect_on_fail`、`cancellable`(`decree`=须下诏方能罢/`never`=不可撤/`by_progress`=随进度自然结案，严禁臆造其它值)。`kind` 只能填 `initiative` 或 `situation`，严禁填 `军事`/`财政`/`工程`/`科技`/`查案` 等题材词。各字段取值见「局势立项规则」。
+new_issue 内部字段：`kind`(`initiative`/`situation`)、`title`、`origin_kind`、`bar_value`(0-100 初始进度)、`expected_months`、`stage_text`、`resolve_condition`、`fail_condition`、`ongoing_effects`、`effect_on_resolve`、`effect_on_fail`、`cancellable`(`decree`=须下诏方能罢/`never`=不可撤/`by_progress`=随进度自然结案，严禁臆造其它值)。`kind` 只能填 `initiative` 或 `situation`，严禁填 `军事`/`财政`/`工程`/`科技`/`查案` 等题材词。`effect_on_resolve` / `effect_on_fail` 可携带稀有 `legacy`（中文 `帝国修正`）对象，表示长期结构性修正。各字段取值见「局势立项规则」。
 
 **财政系数表**（`fiscal_changes.key` 只能从这里选）：
 ```
@@ -167,7 +167,7 @@ decree new_issue 必填字段：
 - `expected_months`：整数，估测皇帝**只下这道初诏、之后不推不补**时自然走到 resolve/fail 需多少{{TURN_UNIT}}。系统按 100/expected_months 算 inertia（钳 -10~+10）。顺势事件（丰年/敌乱/友邦归附）正数 8~16；阻力事件（民变/饥荒/抗税）负数（-6 = 6 月内崩到失败）；势均力敌写大绝对值如 50；极端速成/速崩 ±3，长线工程 ±24。
 - `resolve_condition` / `fail_condition`：可观测的人事/动作锚点，必填。
 - `ongoing_effects`：**严控，不是惩罚叠加器**。`economy`（每{{TURN_UNIT}}固定收支）**仅限**新设的、确需周期性烧钱/产钱的实体工程/机构（火器营月支匠银、新织造局月入）。**财政报告/亏空警讯、查案/会审/辨争/勘核、纯情势/舆论类一律不配 economy ongoing**（亏空已由 fixed_flows 体现，再扣是双重计账）。`metrics` 可小幅配（灾情每月民心-2），单项绝对值 ≤3。拿不准留空。
-- `effect_on_resolve` / `effect_on_fail`：局势结案/失败时一次性永久结算（民心/皇威/钱粮）。**皇威/民心别每条都塞**：只有真正彰显朝廷威权或惠及黎民的大局势结案才配（且 ≤+5），寻常机构办成/差事完结不给或微给；失败局势的 effect_on_fail 反而要敢扣（皇威/民心负值），别只罚钱不罚威信。**`effect_on_fail` 是「会不会崩坏」的开关**：填了=这局势有「彻底失败终结」态，bar 能跌到 0、转 failed、落此永久重创（民变镇不住成燎原、边镇沦陷、改革废止、查案翻盘）；**留空 `{}`=不可崩坏**——bar 下限钳在 1、永不 failed，只能靠 ongoing 持续流血、或赈济平息走 resolve 收尾。**不可控天象/客观灾害（天灾/大旱/水患/瘟疫/饥荒本身）一律 `effect_on_fail:{}`**：旱涝是天定，没有「失败」这一刻，只有缓解或拖着。由其衍生的人祸（流寇坐大、灾民暴动）才会崩坏，那是另立的人祸局势。除 `metrics`/`economy`/`factions` 外，effect 可带 `buildings`——**建筑的新建/扩建/废止唯一入口**。`buildings` 是数组，每项一个动作：
+- `effect_on_resolve` / `effect_on_fail`：局势结案/失败时一次性永久结算（民心/皇威/钱粮）。**皇威/民心别每条都塞**：只有真正彰显朝廷威权或惠及黎民的大局势结案才配（且 ≤+5），寻常机构办成/差事完结不给或微给；失败局势的 effect_on_fail 反而要敢扣（皇威/民心负值），别只罚钱不罚威信。**`effect_on_fail` 是「会不会崩坏」的开关**：填了=这局势有「彻底失败终结」态，bar 能跌到 0、转 failed、落此永久重创（民变镇不住成燎原、边镇沦陷、改革废止、查案翻盘）；**留空 `{}`=不可崩坏**——bar 下限钳在 1、永不 failed，只能靠 ongoing 持续流血、或赈济平息走 resolve 收尾。**不可控天象/客观灾害（天灾/大旱/水患/瘟疫/饥荒本身）一律 `effect_on_fail:{}`**：旱涝是天定，没有「失败」这一刻，只有缓解或拖着。由其衍生的人祸（流寇坐大、灾民暴动）才会崩坏，那是另立的人祸局势。除 `metrics`/`economy`/`factions` 外，effect 可带 `buildings`，也可极少数带 `legacy` / `帝国修正`。`legacy` 格式：`{"name":"...","duration":"2年","modifiers":{"国库":-3,"皇威":-2},"narrative_hint":"..."}`，中文键可用 `名称`/`时长`/`修正`/`叙事提示`。`modifiers` 数字是百分比影响，支持顶层 `国库`/`内库`/`民心`/`皇威`，以及 `{"regions":{"nanzhili":{"tax_per_turn":-3}},"armies":{"guanning":{"morale":-2}}}`。建筑的新建/扩建/废止唯一入口仍是 `buildings`。`buildings` 是数组，每项一个动作：
   - `{"action":"create", "region_id","name","category"(白名单 财政/军事/民生/科技/交通/内廷), 可选 level/condition/maintenance/risk/output_metric(白名单 国库/内库/民心/皇威/"")/output_amount/status}`——工程类局势（建火炮厂/开矿厂/筑边堡/设织造局）**走完 resolve 才在 effect_on_resolve 里 create 建筑**；中途失败则 effect_on_fail 不 create。
   - `{"action":"modify", "building_id"(从 building_ids 选), condition/risk/level/maintenance/output_amount(增量)/output_metric/name/status}`——修缮/升级既有建筑的局势结案时落地。
   - `{"action":"remove", "building_id"}`——拆毁/废止建筑的局势结案时落地。

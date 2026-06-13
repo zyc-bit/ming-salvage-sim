@@ -102,6 +102,90 @@ def calc_province_fiscal(
 
     return guo_ku_total, nei_ku_total, details
 
+
+def compute_budget_lines(db: GameDB, state: GameState) -> Dict[str, Dict[str, List[Dict[str, object]]]]:
+    cfg = db.get_fiscal_config()
+    legacy_mods = db.legacy_modifiers(state)
+
+    def rated(base_key: str, rate_key: str) -> int:
+        return monthly_amount(round(cfg.get(base_key, 0) * cfg.get(rate_key, 100) / 100))
+
+    def adjusted(account: str, amount: int, *, expense: bool = False) -> int:
+        signed = -int(amount or 0) if expense else int(amount or 0)
+        try:
+            pct = int(legacy_mods.get(account, 0) or 0)
+        except (TypeError, ValueError):
+            pct = 0
+        return abs(db.apply_legacy_pct(signed, pct)) if expense else db.apply_legacy_pct(signed, pct)
+
+    guo_income, nei_income, _province_details = calc_province_fiscal(state, db)
+    try:
+        guo_ku_pct = int(legacy_mods.get("国库", 0) or 0)
+    except (TypeError, ValueError):
+        guo_ku_pct = 0
+    army_rows = db.conn.execute("SELECT maintenance_per_turn FROM armies").fetchall()
+    army_total = sum(
+        abs(db.apply_legacy_pct(-int(row["maintenance_per_turn"]), guo_ku_pct))
+        for row in army_rows
+    )
+    budget: Dict[str, Dict[str, List[Dict[str, object]]]] = {
+        "国库": {
+            "income": [
+                {
+                    "name": "田赋辽饷盐商",
+                    "amount": adjusted("国库", int(guo_income)),
+                    "note": "各省田赋+辽饷+盐税+商税（按腐败度/士绅阻力/民变动态折算）",
+                },
+            ],
+            "expense": [
+                {"name": "各军军饷", "amount": int(army_total), "note": "各军月度维护/军饷合计"},
+                {"name": "宗室禄米", "amount": adjusted("国库", rated("宗室禄米_base", "宗室禄米_rate"), expense=True), "note": "诸藩宗室月禄米"},
+                {"name": "百官俸禄", "amount": adjusted("国库", rated("官俸_base", "官俸_rate"), expense=True), "note": "在京百官月俸禄"},
+                {"name": "工部", "amount": adjusted("国库", rated("工程_base", "工程_rate"), expense=True), "note": "工部月维护支出"},
+                {"name": "赈灾备用", "amount": adjusted("国库", rated("赈灾_base", "赈灾_rate"), expense=True), "note": "制度性赈灾预留"},
+            ],
+        },
+        "内库": {
+            "income": [
+                {"name": "皇庄", "amount": adjusted("内库", rated("皇庄_base", "皇庄_rate")), "note": "皇庄地租月上缴"},
+                {"name": "织造", "amount": adjusted("内库", rated("织造_base", "织造_rate")), "note": "苏杭织造局月上缴"},
+                {"name": "矿税", "amount": adjusted("内库", rated("矿税_base", "矿税_rate")), "note": "矿税残余"},
+            ],
+            "expense": [
+                {"name": "宫廷开支", "amount": adjusted("内库", rated("宫廷_base", "宫廷_rate"), expense=True), "note": "皇室日常用度"},
+                {"name": "内廷俸禄", "amount": adjusted("内库", rated("内廷俸_base", "内廷俸_rate"), expense=True), "note": "太监宫女俸禄"},
+                {"name": "妃嫔供奉", "amount": adjusted("内库", rated("妃嫔_base", "妃嫔_rate"), expense=True), "note": "后宫妃嫔月供奉"},
+            ],
+        },
+    }
+    if nei_income > 0:
+        budget["内库"]["income"].append(
+            {"name": "省级皇庄", "amount": adjusted("内库", int(nei_income)), "note": "省级皇庄动态折算"}
+        )
+
+    building_rows = db.conn.execute(
+        "SELECT name, category, condition, maintenance, output_metric, output_amount FROM buildings"
+    ).fetchall()
+    produce_by_acc: Dict[str, int] = {"国库": 0, "内库": 0}
+    maintain_by_acc: Dict[str, int] = {"国库": 0, "内库": 0}
+    for row in building_rows:
+        cond = max(0, min(100, int(row["condition"])))
+        metric = str(row["output_metric"] or "")
+        if metric in ("国库", "内库") and row["output_amount"]:
+            produce_by_acc[metric] += adjusted(metric, round(int(row["output_amount"]) * cond / 100))
+        maint_acc = "内库" if str(row["category"] or "") == "内廷" else "国库"
+        maintain_by_acc[maint_acc] += adjusted(maint_acc, max(0, int(row["maintenance"])), expense=True)
+    for account in ("国库", "内库"):
+        if produce_by_acc[account] > 0:
+            budget[account]["income"].append(
+                {"name": "建筑产出", "amount": produce_by_acc[account], "note": "建筑月产出"}
+            )
+        if maintain_by_acc[account] > 0:
+            budget[account]["expense"].append(
+                {"name": "建筑维护", "amount": maintain_by_acc[account], "note": "建筑月维护"}
+            )
+    return budget
+
 ISSUE_METRIC_KEYS = {"民心", "皇威"}
 ISSUE_METRIC_LOCK_CAPS = {
     "民心": 8, "皇威": 5,
@@ -133,9 +217,13 @@ def signed_period_amount(amount: int, day: int, period_days: int = 1) -> int:
 
 
 def _apply_metric_dict(
-    state: GameState, metric_delta: Dict[str, object], caps: Optional[Dict[str, int]] = None
+    state: GameState,
+    metric_delta: Dict[str, object],
+    caps: Optional[Dict[str, int]] = None,
+    db: Optional[GameDB] = None,
 ) -> Dict[str, int]:
     applied: Dict[str, int] = {}
+    legacy_mods = db.legacy_modifiers(state) if db is not None else {}
     for key, val in (metric_delta or {}).items():
         if key not in ISSUE_METRIC_KEYS:
             continue
@@ -143,6 +231,10 @@ def _apply_metric_dict(
             d = int(val)
         except (TypeError, ValueError):
             continue
+        try:
+            d = db.apply_legacy_pct(d, int(legacy_mods.get(key, 0) or 0)) if db is not None else d
+        except (TypeError, ValueError):
+            pass
         if caps and key in caps:
             cap = caps[key]
             if d > cap:
@@ -309,7 +401,6 @@ def apply_fixed_period_flows(
 
     默认保留原月度行为；period_days=30 时按当前日切成日额落账。
     """
-    cfg = db.get_fiscal_config()
     flows: List[Dict[str, object]] = []
     days = max(1, int(period_days or 1))
     unit = period_label or ("日" if days > 1 else TURN_UNIT)
@@ -321,7 +412,7 @@ def apply_fixed_period_flows(
         amount = _slice(amount)
         if amount <= 0:
             return
-        actual = db.record_issue_economy_move(state, account, amount, category, reason)
+        actual = db.record_issue_economy_move(state, account, amount, category, reason, apply_legacy=False)
         flows.append({"dir": "income", "account": account, "amount": actual,
                       "category": category, "reason": reason, "period_days": days})
 
@@ -329,30 +420,36 @@ def apply_fixed_period_flows(
         amount = _slice(amount)
         if amount <= 0:
             return
-        actual = db.record_issue_economy_move(state, account, -amount, category, reason)
+        actual = db.record_issue_economy_move(state, account, -amount, category, reason, apply_legacy=False)
         flows.append({"dir": "expense", "account": account, "amount": abs(actual),
                       "category": category, "reason": reason, "period_days": days})
 
-    # ── 国库/内库收入（省级动态计算）─────────────────────────────────────────
-    guo_income, nei_income, _province_details = calc_province_fiscal(state, db)
-    _income("国库", guo_income, "田赋辽饷盐商", f"两京十三省{unit}综合税收实入")
-    _income("内库", nei_income, "皇庄",         f"北直隶皇庄{unit}地租")
-
-    # ── 国库支出（非军饷）────────────────────────────────────────────────────
-    _expense("国库", monthly_amount(round(cfg["宗室禄米_base"] * cfg["宗室禄米_rate"] / 100)), "宗室禄米", f"诸藩宗室{unit}禄米")
-    _expense("国库", monthly_amount(round(cfg["官俸_base"]     * cfg["官俸_rate"]     / 100)), "百官俸禄", f"在京百官{unit}俸禄")
-    _expense("国库", monthly_amount(round(cfg["工程_base"]     * cfg["工程_rate"]     / 100)), "工部",     f"工部{unit}维护支出")
-    _expense("国库", monthly_amount(round(cfg["赈灾_base"]     * cfg["赈灾_rate"]     / 100)), "赈灾备用", f"制度性{unit}赈灾预留")
-
-    # ── 内库收入 ──────────────────────────────────────────────────────────────
-    _income("内库", monthly_amount(round(cfg["皇庄_base"]  * cfg["皇庄_rate"]  / 100)), "皇庄",   f"皇庄地租{unit}上缴")
-    _income("内库", monthly_amount(round(cfg["织造_base"]  * cfg["织造_rate"]  / 100)), "织造",   f"苏杭织造局{unit}上缴")
-    _income("内库", monthly_amount(round(cfg["矿税_base"]  * cfg["矿税_rate"]  / 100)), "矿税",   "矿税残余")
-
-    # ── 内库支出 ──────────────────────────────────────────────────────────────
-    _expense("内库", monthly_amount(round(cfg["宫廷_base"]   * cfg["宫廷_rate"]   / 100)), "宫廷开支", f"皇室{unit}用度")
-    _expense("内库", monthly_amount(round(cfg["内廷俸_base"] * cfg["内廷俸_rate"] / 100)), "内廷俸禄", f"太监宫女{unit}俸禄")
-    _expense("内库", monthly_amount(round(cfg["妃嫔_base"]   * cfg["妃嫔_rate"]   / 100)), "妃嫔供奉", f"后宫妃嫔{unit}供奉")
+    budget = compute_budget_lines(db, state)
+    reason_overrides = {
+        "田赋辽饷盐商": f"两京十三省{unit}综合税收实入",
+        "皇庄": f"皇庄地租{unit}上缴",
+        "省级皇庄": f"省级皇庄{unit}地租",
+        "织造": f"苏杭织造局{unit}上缴",
+        "矿税": "矿税残余",
+        "宗室禄米": f"诸藩宗室{unit}禄米",
+        "百官俸禄": f"在京百官{unit}俸禄",
+        "工部": f"工部{unit}维护支出",
+        "赈灾备用": f"制度性{unit}赈灾预留",
+        "宫廷开支": f"皇室{unit}用度",
+        "内廷俸禄": f"太监宫女{unit}俸禄",
+        "妃嫔供奉": f"后宫妃嫔{unit}供奉",
+    }
+    for account_name, account_budget in budget.items():
+        for item in account_budget.get("income", []):
+            name = str(item.get("name") or "")
+            if name == "建筑产出":
+                continue
+            _income(account_name, int(item.get("amount") or 0), name, reason_overrides.get(name, f"{name}{unit}收入"))
+        for item in account_budget.get("expense", []):
+            name = str(item.get("name") or "")
+            if name in ("各军军饷", "建筑维护"):
+                continue
+            _expense(account_name, int(item.get("amount") or 0), name, reason_overrides.get(name, f"{name}{unit}支出"))
 
     # ── 各军军饷（按优先级，先发当月、余额抵旧欠；不足挂 arrears 累计万两）──
     # arrears 字段语义=累计欠饷万两（整数，无上限）。flows 是唯一变更点：
@@ -366,11 +463,16 @@ def apply_fixed_period_flows(
     army_map = {str(r["id"]): r for r in army_rows_raw}
     ordered = [army_map[k] for k in ARMY_SALARY_PRIORITY if k in army_map]
     ordered += [r for r in army_rows_raw if str(r["id"]) not in ARMY_SALARY_PRIORITY]
+    try:
+        guo_ku_pct = int(db.legacy_modifiers(state).get("国库", 0) or 0)
+    except (TypeError, ValueError):
+        guo_ku_pct = 0
 
     for row in ordered:
         army_id = str(row["id"])
         name = str(row["name"])
-        needed = _slice(int(row["maintenance_per_turn"]))
+        needed_month = abs(db.apply_legacy_pct(-int(row["maintenance_per_turn"]), guo_ku_pct))
+        needed = _slice(needed_month)
         if needed <= 0:
             continue
         available = max(0, int(state.metrics["国库"]))
@@ -383,7 +485,8 @@ def apply_fixed_period_flows(
         # 月固定军饷只发当月，不主动还旧欠。旧欠累积拖着，等玩家下旨拨饷才清。
         if pay_current > 0:
             db.record_issue_economy_move(
-                state, "国库", -pay_current, "各军军饷", f"{name}{unit}军饷"
+                state, "国库", -pay_current, "各军军饷", f"{name}{unit}军饷",
+                apply_legacy=False,
             )
 
         new_arrears = max(0, old_arrears + shortfall)
@@ -435,32 +538,49 @@ def apply_fixed_period_flows(
     building_rows = db.conn.execute(
         "SELECT id, name, category, condition, maintenance, output_metric, output_amount FROM buildings"
     ).fetchall()
+    legacy_mods = db.legacy_modifiers(state)
     for row in building_rows:
         bid = str(row["id"])
         name = str(row["name"])
         category = str(row["category"])
         condition = max(0, min(100, int(row["condition"])))
-        maintenance = _slice(max(0, int(row["maintenance"])))
+        raw_maintenance = max(0, int(row["maintenance"]))
         metric = str(row["output_metric"])
         out_base = max(0, int(row["output_amount"]))
-        produced = _slice(round(out_base * condition / 100)) if metric and out_base else 0
 
         if metric in ("国库", "内库"):
+            try:
+                metric_pct = int(legacy_mods.get(metric, 0) or 0)
+            except (TypeError, ValueError):
+                metric_pct = 0
+            produced_month = db.apply_legacy_pct(round(out_base * condition / 100), metric_pct) if metric and out_base else 0
+            produced = _slice(max(0, produced_month))
             if produced > 0:
-                db.record_issue_economy_move(state, metric, produced, "建筑产出", f"{name}{unit}产出")
+                db.record_issue_economy_move(
+                    state, metric, produced, "建筑产出", f"{name}{unit}产出",
+                    apply_legacy=False,
+                )
                 flows.append({"dir": "income", "account": metric, "category": "建筑产出",
                               "building": name, "amount": produced, "period_days": days})
         elif metric in ("民心", "皇威"):
+            produced = _slice(round(out_base * condition / 100)) if metric and out_base else 0
             if produced > 0:
                 before = int(state.metrics.get(metric, 0))
                 state.metrics[metric] = max(0, min(100, before + produced))
                 flows.append({"dir": "score", "metric": metric, "category": "建筑产出",
                               "building": name, "amount": state.metrics[metric] - before, "period_days": days})
 
+        maint_account = "内库" if category == "内廷" else "国库"
+        try:
+            maint_pct = int(legacy_mods.get(maint_account, 0) or 0)
+        except (TypeError, ValueError):
+            maint_pct = 0
+        maintenance = _slice(abs(db.apply_legacy_pct(-raw_maintenance, maint_pct)))
         if maintenance > 0:
-            maint_account = "内库" if category == "内廷" else "国库"
-            paid = db.record_issue_economy_move(state, maint_account, -maintenance, "建筑维护",
-                                                f"{name}{unit}维护费")
+            paid = db.record_issue_economy_move(
+                state, maint_account, -maintenance, "建筑维护",
+                f"{name}{unit}维护费", apply_legacy=False,
+            )
             flows.append({"dir": "expense", "account": maint_account, "category": "建筑维护",
                           "building": name, "needed": maintenance, "paid": abs(paid),
                           "shortfall": maintenance - abs(paid), "period_days": days})

@@ -93,6 +93,8 @@ class GameDB:
         # 复用同一 GameDB 连接。游戏单写者、无并发写，跨线程安全。
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self._legacy_mod_cache: Optional[Dict[str, object]] = None
+        self._legacy_mod_cache_month = 0
         self.init_schema()
 
     def init_schema(self) -> None:
@@ -618,6 +620,24 @@ class GameDB:
             CREATE INDEX IF NOT EXISTS idx_issues_active
             ON issues(kind, status, severity DESC);
 
+            CREATE TABLE IF NOT EXISTS legacies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                source_issue_id INTEGER,
+                modifiers TEXT NOT NULL DEFAULT '{}',
+                narrative_hint TEXT NOT NULL DEFAULT '',
+                start_month INTEGER NOT NULL,
+                duration_months INTEGER NOT NULL DEFAULT 24,
+                status TEXT NOT NULL DEFAULT 'active',
+                clear_gate TEXT NOT NULL DEFAULT '{}',
+                legacy_key TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_legacies_active
+            ON legacies(status, legacy_key);
+
             CREATE INDEX IF NOT EXISTS idx_issue_advances_issue
             ON issue_advances(issue_id, turn);
 
@@ -706,6 +726,8 @@ class GameDB:
         self.ensure_column("characters", "location", "TEXT NOT NULL DEFAULT ''")
         self.ensure_column("issues", "resolve_condition", "TEXT NOT NULL DEFAULT ''")
         self.ensure_column("issues", "fail_condition", "TEXT NOT NULL DEFAULT ''")
+        self.ensure_column("legacies", "clear_gate", "TEXT NOT NULL DEFAULT '{}'")
+        self.ensure_column("legacies", "legacy_key", "TEXT NOT NULL DEFAULT ''")
         self.ensure_column("characters", "birth_year", "INTEGER NOT NULL DEFAULT 0")
         self.ensure_column("characters", "historical_death_year", "INTEGER NOT NULL DEFAULT 0")
         self.ensure_column("characters", "historical_death_month", "INTEGER NOT NULL DEFAULT 0")
@@ -1254,6 +1276,139 @@ class GameDB:
         )
         self.conn.commit()
 
+    def _legacy_abs_month(self, state: GameState) -> int:
+        return int(state.year) * 12 + int(state.period)
+
+    def _invalidate_legacy_cache(self) -> None:
+        self._legacy_mod_cache = None
+        self._legacy_mod_cache_month = 0
+
+    def insert_legacy(
+        self,
+        state: GameState,
+        name: str,
+        modifiers: Dict[str, object],
+        narrative_hint: str = "",
+        duration_months: int = 24,
+        source_issue_id: int | None = None,
+        clear_gate: Dict[str, str] | None = None,
+        legacy_key: str = "",
+    ) -> int:
+        if not name or not isinstance(modifiers, dict) or not modifiers:
+            return 0
+        cur = self.conn.execute(
+            """
+            INSERT INTO legacies (
+                name, source_issue_id, modifiers, narrative_hint, start_month,
+                duration_months, status, clear_gate, legacy_key
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
+            """,
+            (
+                str(name)[:60],
+                source_issue_id,
+                json.dumps(modifiers, ensure_ascii=False),
+                str(narrative_hint or "")[:240],
+                self._legacy_abs_month(state),
+                int(duration_months),
+                json.dumps(clear_gate or {}, ensure_ascii=False),
+                str(legacy_key or "")[:80],
+            ),
+        )
+        self.conn.commit()
+        self._invalidate_legacy_cache()
+        return int(cur.lastrowid)
+
+    def expire_legacies(self, state: GameState) -> None:
+        now = self._legacy_abs_month(state)
+        rows = self.conn.execute(
+            "SELECT id, start_month, duration_months FROM legacies WHERE status='active'"
+        ).fetchall()
+        expired: List[int] = []
+        for row in rows:
+            duration = int(row["duration_months"])
+            if duration >= 0 and int(row["start_month"]) + duration <= now:
+                expired.append(int(row["id"]))
+        if not expired:
+            return
+        placeholders = ",".join("?" for _ in expired)
+        self.conn.execute(
+            f"UPDATE legacies SET status='expired', updated_at=CURRENT_TIMESTAMP WHERE id IN ({placeholders})",
+            expired,
+        )
+        self.conn.commit()
+        self._invalidate_legacy_cache()
+
+    def list_active_legacies(self, state: GameState) -> List[sqlite3.Row]:
+        self.expire_legacies(state)
+        return self.conn.execute(
+            "SELECT * FROM legacies WHERE status='active' ORDER BY id"
+        ).fetchall()
+
+    def legacy_remaining_months(self, row: sqlite3.Row, state: GameState) -> int | None:
+        duration = int(row["duration_months"])
+        if duration < 0:
+            return None
+        return max(0, int(row["start_month"]) + duration - self._legacy_abs_month(state))
+
+    def legacy_payload(self, state: GameState) -> List[Dict[str, object]]:
+        payload: List[Dict[str, object]] = []
+        for row in self.list_active_legacies(state):
+            try:
+                modifiers = json.loads(row["modifiers"] or "{}")
+            except Exception:
+                modifiers = {}
+            payload.append({
+                "id": int(row["id"]),
+                "key": str(row["legacy_key"] or ""),
+                "name": str(row["name"] or ""),
+                "modifiers": modifiers,
+                "narrative_hint": str(row["narrative_hint"] or ""),
+                "remaining_months": self.legacy_remaining_months(row, state),
+            })
+        return payload
+
+    def legacy_modifiers(self, state: GameState) -> Dict[str, object]:
+        month_key = self._legacy_abs_month(state)
+        if self._legacy_mod_cache is not None and self._legacy_mod_cache_month == month_key:
+            return self._legacy_mod_cache
+
+        def merge(dst: Dict[str, object], src: Dict[str, object]) -> None:
+            for raw_key, raw_val in src.items():
+                key = str(raw_key)
+                if isinstance(raw_val, dict):
+                    bucket = dst.get(key)
+                    if not isinstance(bucket, dict):
+                        bucket = {}
+                        dst[key] = bucket
+                    merge(bucket, raw_val)
+                    continue
+                try:
+                    delta = int(raw_val)
+                except (TypeError, ValueError):
+                    continue
+                dst[key] = int(dst.get(key, 0) or 0) + delta
+
+        combined: Dict[str, object] = {}
+        for row in self.list_active_legacies(state):
+            try:
+                mods = json.loads(row["modifiers"] or "{}")
+            except Exception:
+                continue
+            if isinstance(mods, dict):
+                merge(combined, mods)
+        self._legacy_mod_cache = combined
+        self._legacy_mod_cache_month = month_key
+        return combined
+
+    def apply_legacy_pct(self, amount: int, pct: int) -> int:
+        amount = int(amount or 0)
+        pct = int(pct or 0)
+        if amount == 0 or pct == 0:
+            return amount
+        factor = 100 + pct if amount > 0 else 100 - pct
+        return round(amount * max(0, factor) / 100)
+
     def seed_opening_crises(self, state: GameState) -> None:
         """新档首次进入时塞 1627 即位三大危机为 active situation issue。"""
         from ming_sim.assets import load_json_asset
@@ -1677,65 +1832,29 @@ class GameDB:
         self.sync_economy_accounts(state)
         self.conn.commit()
 
-    def treasury_budget_summary(self) -> str:
-        cfg = self.get_fiscal_config()
-        land_base = self.conn.execute("SELECT SUM(tax_per_turn) FROM regions").fetchone()[0] or 0
-        army_total = self.conn.execute("SELECT SUM(maintenance_per_turn) FROM armies").fetchone()[0] or 0
-        gk_in = (
-            round(land_base * cfg.get("田赋_rate", 68) / 100)
-            + round(cfg.get("辽饷_base", 130) * cfg.get("辽饷_rate", 100) / 100)
-            + round(cfg.get("盐税_base", 70) * cfg.get("盐税_rate", 100) / 100)
-            + round(cfg.get("商税_base", 22) * cfg.get("商税_rate", 100) / 100)
-        )
-        gk_out = (
-            int(army_total)
-            + round(cfg.get("宗室禄米_base", 100) * cfg.get("宗室禄米_rate", 70) / 100)
-            + round(cfg.get("官俸_base", 35) * cfg.get("官俸_rate", 100) / 100)
-            + round(cfg.get("工程_base", 15) * cfg.get("工程_rate", 100) / 100)
-            + round(cfg.get("赈灾_base", 15) * cfg.get("赈灾_rate", 100) / 100)
-        )
-        nk_in = (
-            round(cfg.get("皇庄_base", 60) * cfg.get("皇庄_rate", 100) / 100)
-            + round(cfg.get("织造_base", 35) * cfg.get("织造_rate", 100) / 100)
-            + round(cfg.get("矿税_base", 10) * cfg.get("矿税_rate", 100) / 100)
-        )
-        nk_out = (
-            round(cfg.get("宫廷_base", 22) * cfg.get("宫廷_rate", 100) / 100)
-            + round(cfg.get("内廷俸_base", 15) * cfg.get("内廷俸_rate", 100) / 100)
-            + round(cfg.get("妃嫔_base", 10) * cfg.get("妃嫔_rate", 100) / 100)
-        )
-        # 建筑：maintenance/output_amount 已是月值，不过 monthly_amount。
-        # 维护按 category 分账：内廷扣内库，其它扣国库。产出按 output_metric 走。
-        build_rows = self.conn.execute(
-            "SELECT category, condition, maintenance, output_metric, output_amount FROM buildings"
-        ).fetchall()
-        b_gk_out = b_nk_out = b_gk_in = b_nk_in = 0
-        for r in build_rows:
-            maint = max(0, int(r["maintenance"]))
-            if str(r["category"]) == "内廷":
-                b_nk_out += maint
-            else:
-                b_gk_out += maint
-            metric = str(r["output_metric"])
-            cond = max(0, min(100, int(r["condition"])))
-            out = max(0, int(r["output_amount"]))
-            produced = round(out * cond / 100) if metric and out else 0
-            if metric == "国库":
-                b_gk_in += produced
-            elif metric == "内库":
-                b_nk_in += produced
+    def treasury_budget_summary(self, state: GameState) -> str:
+        from ming_sim.flows import compute_budget_lines
 
-        gk_net = monthly_amount(gk_in) + b_gk_in - monthly_amount(gk_out) - b_gk_out
-        nk_net = monthly_amount(nk_in) + b_nk_in - monthly_amount(nk_out) - b_nk_out
+        budget = compute_budget_lines(self, state)
+        gk_in = sum(int(item["amount"]) for item in budget["国库"]["income"])
+        gk_out = sum(int(item["amount"]) for item in budget["国库"]["expense"])
+        nk_in = sum(int(item["amount"]) for item in budget["内库"]["income"])
+        nk_out = sum(int(item["amount"]) for item in budget["内库"]["expense"])
+        gk_build_in = sum(int(item["amount"]) for item in budget["国库"]["income"] if item["name"] == "建筑产出")
+        gk_build_out = sum(int(item["amount"]) for item in budget["国库"]["expense"] if item["name"] == "建筑维护")
+        nk_build_out = sum(int(item["amount"]) for item in budget["内库"]["expense"] if item["name"] == "建筑维护")
+        army_total = sum(int(item["amount"]) for item in budget["国库"]["expense"] if item["name"] == "各军军饷")
+        gk_net = gk_in - gk_out
+        nk_net = nk_in - nk_out
         return (
-            f"{TURN_UNIT}度预算基准：国库入{format_money(monthly_amount(gk_in) + b_gk_in)}"
-            f"（田赋+辽饷+盐税+商税+建筑产出{format_money(b_gk_in)}）"
-            f"出{format_money(monthly_amount(gk_out) + b_gk_out)}"
-            f"（军饷{format_money(monthly_amount(int(army_total)))}+宗室+官俸+补给+建筑维护{format_money(b_gk_out)}）"
+            f"{TURN_UNIT}度预算基准：国库入{format_money(gk_in)}"
+            f"（田赋+辽饷+盐税+商税+建筑产出{format_money(gk_build_in)}）"
+            f"出{format_money(gk_out)}"
+            f"（军饷{format_money(army_total)}+宗室+官俸+补给+建筑维护{format_money(gk_build_out)}）"
             f"净{format_money_delta(gk_net)}；"
-            f"内库入{format_money(monthly_amount(nk_in) + b_nk_in)}"
-            f"出{format_money(monthly_amount(nk_out) + b_nk_out)}"
-            f"（内廷维护{format_money(b_nk_out)}）"
+            f"内库入{format_money(nk_in)}"
+            f"出{format_money(nk_out)}"
+            f"（内廷维护{format_money(nk_build_out)}）"
             f"净{format_money_delta(nk_net)}。"
         )
 
@@ -1784,7 +1903,7 @@ class GameDB:
                 f"{period_label(int(row['year']), int(row['period']))} {row['account']}{sign}{format_money(delta)} {row['category']}：{row['reason']}"
             )
         recent_text = "；".join(recent) if recent else "未见流水"
-        budget = self.treasury_budget_summary()
+        budget = self.treasury_budget_summary(state)
         return f"{budget}账面：{account_text}。本{TURN_UNIT}收支：{period_text}。近账：{recent_text}。"
 
     def faction_report(self) -> str:
@@ -2174,11 +2293,15 @@ class GameDB:
         region_deltas: Dict[str, Dict[str, object]],
     ) -> List[Dict[str, object]]:
         changes: List[Dict[str, object]] = []
+        legacy_regions = self.legacy_modifiers(state).get("regions") or {}
         for region_id, raw_changes in region_deltas.items():
             row = self.conn.execute("SELECT * FROM regions WHERE id = ?", (region_id,)).fetchone()
             if row is None:
                 print(f"[WARN] region_delta 引用未入库地区 '{region_id}' → 跳过")
                 continue
+            region_mods = legacy_regions.get(region_id) if isinstance(legacy_regions, dict) else {}
+            if not isinstance(region_mods, dict):
+                region_mods = {}
             reason = str(raw_changes.get("reason") or raw_changes.get("原因") or event.title).strip()[:80]
             for raw_field, value in raw_changes.items():
                 field = REGION_FIELD_ALIASES.get(str(raw_field).strip(), str(raw_field).strip())
@@ -2196,7 +2319,7 @@ class GameDB:
                 if field in FISCAL_SCORE_FIELDS:
                     fiscal: dict = json.loads(str(row["fiscal"] or "{}"))
                     old_value = fiscal.get(field, 50)
-                    delta = int(value)
+                    delta = self.apply_legacy_pct(int(value), int(region_mods.get(field, 0) or 0))
                     new_value = max(0, min(100, int(old_value) + delta))
                     actual_delta = new_value - int(old_value)
                     if actual_delta == 0:
@@ -2227,7 +2350,7 @@ class GameDB:
                 # ── 直接列字段 ────────────────────────────────────────────────
                 old_value = row[field]
                 if field in REGION_SCORE_FIELDS:
-                    delta = int(value)
+                    delta = self.apply_legacy_pct(int(value), int(region_mods.get(field, 0) or 0))
                     new_value = max(0, min(100, int(old_value) + delta))
                     actual_delta = new_value - int(old_value)
                     if actual_delta == 0:
@@ -2235,7 +2358,7 @@ class GameDB:
                     stored_new: object = new_value
                     log_delta: int | None = actual_delta
                 elif field in REGION_QUANTITY_FIELDS:
-                    delta = int(value)
+                    delta = self.apply_legacy_pct(int(value), int(region_mods.get(field, 0) or 0))
                     new_value = max(0, int(old_value) + delta)
                     actual_delta = new_value - int(old_value)
                     if actual_delta == 0:
@@ -2504,11 +2627,15 @@ class GameDB:
         army_deltas: Dict[str, Dict[str, object]],
     ) -> List[Dict[str, object]]:
         changes: List[Dict[str, object]] = []
+        legacy_armies = self.legacy_modifiers(state).get("armies") or {}
         for army_id, raw_changes in army_deltas.items():
             row = self.conn.execute("SELECT * FROM armies WHERE id = ?", (army_id,)).fetchone()
             if row is None:
                 print(f"[WARN] army_delta 引用未入库军队 '{army_id}' → 跳过")
                 continue
+            army_mods = legacy_armies.get(army_id) if isinstance(legacy_armies, dict) else {}
+            if not isinstance(army_mods, dict):
+                army_mods = {}
             reason = str(raw_changes.get("reason") or raw_changes.get("原因") or event.title).strip()[:80]
             _valid_army_fields = set(ARMY_SCORE_FIELDS + ARMY_QUANTITY_FIELDS + ARMY_TEXT_FIELDS)
             for raw_field, value in raw_changes.items():
@@ -2523,7 +2650,7 @@ class GameDB:
                     # arrears 单位=累计欠饷万两，无上限，按需累加。
                     # 正常情况由 flows 唯一变更；此处兜底允许 extractor 在战损/裁军等
                     # 非现金原因下写入（提示词已禁，但保留兜底以防 LLM 越界不至于截断）。
-                    delta = int(value)
+                    delta = self.apply_legacy_pct(int(value), int(army_mods.get(field, 0) or 0))
                     new_value = max(0, int(old_value) + delta)
                     actual_delta = new_value - int(old_value)
                     if actual_delta == 0:
@@ -2531,7 +2658,7 @@ class GameDB:
                     stored_new: object = new_value
                     log_delta: int | None = actual_delta
                 elif field in ARMY_SCORE_FIELDS:
-                    delta = int(value)
+                    delta = self.apply_legacy_pct(int(value), int(army_mods.get(field, 0) or 0))
                     new_value = max(0, min(100, int(old_value) + delta))
                     actual_delta = new_value - int(old_value)
                     if actual_delta == 0:
@@ -2539,7 +2666,7 @@ class GameDB:
                     stored_new = new_value
                     log_delta = actual_delta
                 elif field == "manpower":
-                    delta = int(value)
+                    delta = self.apply_legacy_pct(int(value), int(army_mods.get(field, 0) or 0))
                     new_value = max(0, int(old_value) + delta)
                     actual_delta = new_value - int(old_value)
                     if actual_delta == 0:
@@ -2547,7 +2674,7 @@ class GameDB:
                     stored_new = new_value
                     log_delta = actual_delta
                 elif field == "maintenance_per_turn":
-                    delta = int(value)
+                    delta = self.apply_legacy_pct(int(value), int(army_mods.get(field, 0) or 0))
                     new_value = max(0, int(old_value) + delta)
                     actual_delta = new_value - int(old_value)
                     if actual_delta == 0:
@@ -4254,14 +4381,22 @@ class GameDB:
         purpose: str | None = None,
         target_kind: str | None = None,
         target_id: str | None = None,
+        apply_legacy: bool = True,
     ) -> int:
         """记一笔经济流水到 economy_ledger，同步更新 metrics[account]。
 
         purpose/target_kind/target_id 仅对 extractor 抽出的 economy_moves（自由拨款）填，
         flows 月固定支出与所有收入一律 None。受控枚举见 constants.ECONOMY_PURPOSES。
         """
+        delta = int(delta)
+        if apply_legacy and purpose != "补饷":
+            try:
+                pct = int(self.legacy_modifiers(state).get(account, 0) or 0)
+            except (TypeError, ValueError):
+                pct = 0
+            delta = self.apply_legacy_pct(delta, pct)
         before = int(state.metrics[account])
-        after = max(0, before + int(delta))
+        after = max(0, before + delta)
         actual = after - before
         if actual == 0:
             return 0

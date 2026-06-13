@@ -23,7 +23,7 @@ from ming_sim.context import victory_status
 from ming_sim.db import GameDB
 from ming_sim.exceptions import LLMContractError, LLMUnavailable
 from ming_sim.flows import apply_fixed_daily_flows
-from ming_sim.issues import apply_issue_inertia_and_ongoing, apply_score_extraction
+from ming_sim.issues import apply_issue_inertia_and_ongoing, apply_score_extraction, clear_gated_legacies
 from ming_sim.llm_model import extract_agent_text, llm_unavailable_from_error
 from ming_sim.models import GameState, LLMConfig, date_label
 from ming_sim.memories import extract_all_chat_memories
@@ -249,6 +249,7 @@ def resolve_immediate_event(
             extractor_output=extractor_output,
             applied_summary=json.dumps(applied_summary, ensure_ascii=False, sort_keys=False),
         )
+        clear_gated_legacies(db, state)
         db.save_state(state)
         event = db.get_court_event(event_id)
         _emit("immediate_done", json.dumps(event or {}, ensure_ascii=False))
@@ -404,6 +405,7 @@ def resolve_day_end(
             extractor_output=f"[日终推演 agent 失败] {exc}；本日跳过 extractor。",
         )
         apply_issue_inertia_and_ongoing(db, state, touched_ids=set(), period_days=30)
+        clear_gated_legacies(db, state)
         db.save_state(state)
         assert state.turn == before_turn
         return narrative, {}
@@ -471,6 +473,7 @@ def resolve_day_end(
     for adv in applied.get("issue_summary", {}).get("advances", []) or []:
         touched_ids.add(int(adv.get("issue_id") or 0))
     apply_issue_inertia_and_ongoing(db, state, touched_ids=touched_ids, period_days=30)
+    clear_gated_legacies(db, state)
 
     outcome = applied.get("victory_status") or victory_status(db, state)
     if isinstance(outcome, dict) and outcome.get("status") != "ongoing":

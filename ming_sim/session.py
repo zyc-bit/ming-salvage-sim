@@ -31,7 +31,7 @@ from ming_sim.decree import (
     resolve_month_summary,
     write_decree_with_agno,
 )
-from ming_sim.issues import bind_content as _bind_issues
+from ming_sim.issues import bind_content as _bind_issues, sync_opening_legacies
 from ming_sim.llm_model import create_agno_db, extract_agent_text, verify_llm_available
 from ming_sim.models import Character, CourtContext, GameState, LLMConfig
 from ming_sim.paths import user_data_path
@@ -378,6 +378,7 @@ class GameSession:
         _sync_offices_from_db_impl(self.content, self.db)
         self.agno_db = create_agno_db(db_path)
         self.state = self.db.load_state(start_ym)
+        sync_opening_legacies(self.db, self.state)
         self.deaths_this_turn: List[Dict[str, str]] = []
         self.debuts_this_turn: List[Dict[str, str]] = []
         self.power_renames_this_turn: List[Dict[str, object]] = []
@@ -393,6 +394,7 @@ class GameSession:
     def begin_turn(self) -> TurnSnapshot:
         """加载/刷新本回合：历史卒、上回合奏报、重建 registry。幂等。"""
         self.state = self.db.load_state()
+        sync_opening_legacies(self.db, self.state)
         self.deaths_this_turn = self.db.apply_historical_deaths(self.state)
         self.debuts_this_turn = self.db.apply_historical_debuts(self.state)
         self.power_renames_this_turn = self.db.apply_historical_power_renames(self.state)

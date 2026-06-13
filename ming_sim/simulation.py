@@ -71,6 +71,11 @@ ITEM_FIELD_ALIASES = {
     "economy": "economy", "钱粮": "economy",
     "factions": "factions", "派系": "factions",
     "buildings": "buildings", "建筑": "buildings",
+    "legacy": "legacy", "帝国修正": "legacy",
+    "modifiers": "modifiers", "修正": "modifiers",
+    "duration": "duration", "时长": "duration",
+    "narrative_hint": "narrative_hint", "叙事提示": "narrative_hint",
+    "clear_gate": "clear_gate", "解除条件": "clear_gate",
     "action": "action", "动作": "action",
     "region_id": "region_id", "地区编号": "region_id",
     "category": "category", "类别": "category",
@@ -256,6 +261,7 @@ def build_simulator_payload(
         "classes_brief": db.class_report(),
         "powers_brief": db.power_report(exclude_self=True),
         "active_issues": issues_payload,
+        "active_legacies": db.legacy_payload(state),
         "candidate_events": candidate_events,
         "previous_narrative_tail": previous_narrative[-1500:] if previous_narrative else "",
         "historical_anchor": historical_anchor_for_month(state.year, state.period),
@@ -269,7 +275,7 @@ def build_simulator_payload(
         "debuts_this_turn": debuts_this_turn or [],
         "relevant_memories": relevant_memories or [],
         "secret_orders": secret_orders or [],
-        "data_note": "regions/armies/buildings 均为 header+二维数组（cols 列名 + rows 数据）。secret_orders 为皇帝密令列表，独立于 relevant_memories，每条含 id/minister_name/title/content/status/result 字段。",
+        "data_note": "regions/armies/buildings 均为 header+二维数组（cols 列名 + rows 数据）。active_legacies 为当前帝国修正，只作长期背景与数值修正来源。secret_orders 为皇帝密令列表，独立于 relevant_memories，每条含 id/minister_name/title/content/status/result 字段。",
     }
     if extra_context:
         payload.update(extra_context)
@@ -431,6 +437,7 @@ def _extractor_context_payload(
         "narrative": narrative,
         "decree_text": decree_text,
         "active_issues": issues_brief,
+        "active_legacies": db.legacy_payload(state),
         "candidate_events": [{"id": ev.id, "title": ev.title} for ev in gather_candidate_events(state, db)],
         "current_state": dict(state.metrics),
         "factions": db.faction_report(),
@@ -448,7 +455,7 @@ def _extractor_context_payload(
         "fiscal_config": db.get_fiscal_config(),
         "relevant_memories": relevant_memories or [],
         "secret_orders": secret_orders or [],
-        "_format_note": "regions/armies/buildings/powers/active_ministers/offstage_ministers 均为 header+二维数组（cols 列名 + rows 数据）。",
+        "_format_note": "regions/armies/buildings/powers/active_ministers/offstage_ministers 均为 header+二维数组（cols 列名 + rows 数据）。active_legacies 为当前帝国修正。",
     }
     if extra_context:
         payload.update(extra_context)
@@ -461,6 +468,7 @@ def _extractor_compat_payload(base: Dict[str, object]) -> Dict[str, object]:
         "narrative": base["narrative"],
         "decree_text": base["decree_text"],
         "active_issues": base["active_issues"],
+        "active_legacies": base["active_legacies"],
         "candidate_events": base["candidate_events"],
         "current_state": base["current_state"],
         "factions": base["factions"],

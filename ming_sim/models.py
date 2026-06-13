@@ -71,6 +71,16 @@ class Event:
 
 
 @dataclass
+class OpeningLegacy:
+    key: str
+    name: str
+    modifiers: Dict[str, object]
+    narrative_hint: str
+    clear_gate: Dict[str, str]
+    clear_narrative: str = ""
+
+
+@dataclass
 class Faction:
     name: str
     satisfaction: int

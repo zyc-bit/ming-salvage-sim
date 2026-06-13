@@ -1,0 +1,34 @@
+[
+  {
+    "key": "yandang_zhuanquan",
+    "name": "阉党专权·朝纲败坏",
+    "modifiers": {"皇威": -3, "国库": -2},
+    "narrative_hint": "魏忠贤余势与厂卫积威仍在，清流、六部和地方官署都不信新政能立刻贯彻。",
+    "clear_gate": {"faction.阉党.leverage": "<=10"},
+    "clear_narrative": "阉党根脚被削，厂卫不再能挟旧势压倒朝局。"
+  },
+  {
+    "key": "gentry_resist",
+    "name": "士绅抗税·江南截留",
+    "modifiers": {"国库": -3, "regions": {"nanzhili": {"tax_per_turn": -3}, "zhejiang": {"tax_per_turn": -3}}},
+    "narrative_hint": "江南士绅抗税与火耗截留拖慢清丈、追缴和新税落账。",
+    "clear_gate": {"region.nanzhili|zhejiang.gentry_resistance.max": "<=20"},
+    "clear_narrative": "南直隶、浙江士绅阻力显著下降，赋税解运恢复。"
+  },
+  {
+    "key": "land_unsurveyed",
+    "name": "隐田未清·册籍失真",
+    "modifiers": {"国库": -4},
+    "narrative_hint": "隐田、逃户与册籍失真让户部账面税基长期偏低。",
+    "clear_gate": {"region.beizhili|nanzhili|zhejiang|shandong|shanxi|shaanxi|henan|jiangxi|huguang|sichuan|fujian|guangdong|guangxi|yunnan|guizhou|liaodong.hidden_land.sum": "<=900"},
+    "clear_narrative": "大省清丈见效，隐田规模压到可控范围。"
+  },
+  {
+    "key": "liaodong_lost",
+    "name": "辽沈沦陷·边镇震恐",
+    "modifiers": {"皇威": -4, "国库": -3, "regions": {"liaodong": {"military_pressure": 4}}, "armies": {"guanning": {"morale": -2}}},
+    "narrative_hint": "辽沈旧失仍压在朝野心头，辽饷、边军士气和皇威都受牵累。",
+    "clear_gate": {"region.shenyang_liaoyang.controlled_by": "==ming"},
+    "clear_narrative": "沈阳、辽阳收复，辽沈旧失的朝野压力解除。"
+  }
+]

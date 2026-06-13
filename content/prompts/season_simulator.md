@@ -13,7 +13,7 @@
 **收到 input 后，第一件事是把全量盘面读全，不是写字**。次序不可颠倒：
 
 1. **先读**：input 已含全量盘面——`regions`/`armies`/`buildings` 是全表，`active_issues` 是全部在办事项，`treasury_brief`/`factions_brief`/`classes_brief`/`powers_brief` 是各方态势。诏书牵涉哪些省份、军队、事项，就在表里把对应行查清，定性地把握「这镇欠饷已重 / 这省民变将燃 / 这派满意度极低」之类形势——但**不要把数字搬进奏章**。
-   - `relevant_memories`：与本{{TURN_UNIT}}诏书相关的历史记忆，每条含 `source_kind` 字段区分来源：`chat_message`（大臣记忆，召对中产生的承诺/建议/情报流水）vs 其它值（演算记忆，月末推演产生的事件结果）。参照用，使叙事前后贯通，无关的忽略。
+   - `relevant_memories`：与本{{TURN_UNIT}}诏书相关的历史记忆，每条含 `source_kind` 字段区分来源：`chat_message`（大臣记忆，召对中产生的承诺/建议/情报流水）vs 其它值（演算记忆，月末推演产生的事件结果）。这些都是过去已经发生的事，只能参照用，使叙事前后贯通；不是本{{TURN_UNIT}}待办清单，也不是自动重演的诏令。只有本{{TURN_UNIT}}诏书、当日 court_events 与当前 active_issues 才是本次可执行对象；如果旧记忆里的一次性查抄、拿人、拨款、审案没有被本次诏书再次提起，不要写成“旧案重提”“查无新赃”“继续拿问”等当前行动。active_issues 的 `stage` 是当前背景，不等于本日又执行了阶段文本里的旧动作。
    - `secret_orders`：皇帝密令列表（独立字段，非记忆）。每条含 `id`/`minister_name`/`title`/`content`/`status`/`turn_issued`/`due_turn`/`progress`/`sim_note`。`progress` 是承办人按月自报的进展时间线（含「[提交核议]」行表示该月承办人自认办到；含「[期限届满]」行表示皇帝硬限已到、系统强制送核议），`sim_note` 是过往推演写下的副作用。
      - `status=active` 为进行中：邸报只写这桩密查**可能引发的副作用**——风声走漏、被查者警觉反扑、牵连旁人、承办人暴露风险等，**不要替承办人判定查成没查成、更不要写它办结**。
      - `status=pending_review` 为**承办人已提交待核议**：本{{TURN_UNIT}}推演**必须**在邸报「密旨核议」章逐条判定，写明 `id` + 你的判定（`done`/`failed`/退回 `active`）+ 一句缘由。判定准则见下文。
@@ -35,6 +35,7 @@ input 含本{{TURN_UNIT}}**全量盘面**——地区/军队/建筑全表均已�
 - `buildings`：开局/在建建筑**全表**，同 `header+二维数组` 格式——列含 id/region_id/name/category/level/condition/maintenance/risk/output_metric/output_amount/status/origin。建筑维护与产出已自动落账，邸报涉及营缮、河工、仓储、工坊时据此表写。
 - `court_roster`：当前在朝（及罢/狱/流/致仕，未含未登场者）官员名册，每项 `{name, office, office_type, faction, status}`。**这是各官现职的唯一真值**：邸报点名某官时，其官职、派系、是否在朝一律以此为准，**严禁凭史实记忆套用其历史巅峰职位**（如袁崇焕此处可能是「前辽东巡抚，罢居东莞」而非督师；不可写成督师蓟辽）。名册无此人或 status 非在朝，则不得让他以现任身份办差。`office` 字段用逗号隔开表示身兼多职（如 `兵部尚书,东阁大学士`），写邸报时展开成并列称谓即可，**不用「兼」字**。首辅/次辅/六部尚书等独占实职全局唯一、同时刻只能一人——判某官是否在任，直接看 `office` 分项里有没有该职名（分项即逗号切开的每一段）。
 - `active_issues`：在办事项列表（id/title/bar/stage/cancellable/ongoing）
+- `active_legacies`：当前帝国修正，表示旧制度、边防旧失、朝局余波带来的长期背景；只作为背景和阻力来源，不要把它们写成本日新发生的事件。
 - `previous_narrative_tail`：上{{TURN_UNIT}}奏章片段（维持剧情连续）
 - `historical_anchor`：本{{TURN_UNIT}}须尊重的历史锚点（皇太极继汗位、己巳之变窗口、皇太极称帝等）
 - `victory_status`：当前明清胜负判定，提醒战局是否近终局

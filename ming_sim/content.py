@@ -26,6 +26,7 @@ from ming_sim.models import (
     Character,
     Event,
     Faction,
+    OpeningLegacy,
     Power,
     Region,
     SocialClass,
@@ -129,6 +130,35 @@ def load_event_content(filename: str = "events.json") -> List[Event]:
     if not events:
         raise SystemExit(f"{filename} 必须至少定义一个事件。")
     return events
+
+
+def load_opening_legacy_content(filename: str = "opening_legacies.json") -> List[OpeningLegacy]:
+    legacies: List[OpeningLegacy] = []
+    for idx, raw in enumerate(require_list(load_json_asset(filename), filename), 1):
+        item = require_dict(raw, f"{filename}[{idx}]")
+        modifiers = item.get("modifiers") or {}
+        clear_gate = item.get("clear_gate") or {}
+        if not isinstance(modifiers, dict):
+            raise SystemExit(f"{filename}[{idx}].modifiers 必须是对象。")
+        if not isinstance(clear_gate, dict):
+            raise SystemExit(f"{filename}[{idx}].clear_gate 必须是对象。")
+        for gate_key, gate_cond in clear_gate.items():
+            cond = str(gate_cond).strip()
+            if not re.match(r"^(>=|<=|>|<|==)\s*[-\w\u4e00-\u9fff]+$", cond):
+                raise SystemExit(
+                    f"{filename}[{idx}] clear_gate['{gate_key}'] 非法：{cond!r}。"
+                )
+        legacies.append(
+            OpeningLegacy(
+                key=str_field(item, "key", f"{filename}[{idx}]"),
+                name=str_field(item, "name", f"{filename}[{idx}]"),
+                modifiers=dict(modifiers),
+                narrative_hint=str(item.get("narrative_hint") or ""),
+                clear_gate={str(k): str(v).strip() for k, v in clear_gate.items()},
+                clear_narrative=str(item.get("clear_narrative") or ""),
+            )
+        )
+    return legacies
 
 
 def load_region_content() -> Dict[str, Region]:
@@ -376,6 +406,7 @@ class GameContent:
     events: List[Event] = field(default_factory=list)
     seed_events: List[Event] = field(default_factory=list)
     event_by_id: Dict[str, Event] = field(default_factory=dict)
+    opening_legacies: List[OpeningLegacy] = field(default_factory=list)
     regions: Dict[str, Region] = field(default_factory=dict)
     armies: Dict[str, Army] = field(default_factory=dict)
     buildings: Dict[str, Building] = field(default_factory=dict)
@@ -414,6 +445,7 @@ class GameContent:
         factions, characters = load_character_content()
         events = load_event_content("events.json")
         seed_events = load_event_content("seed_events.json")
+        opening_legacies = load_opening_legacy_content()
         regions = load_region_content()
         armies = load_army_content()
         buildings = load_building_content()
@@ -437,6 +469,7 @@ class GameContent:
             events=events,
             seed_events=seed_events,
             event_by_id={ev.id: ev for ev in (*events, *seed_events)},
+            opening_legacies=opening_legacies,
             regions=regions,
             armies=armies,
             buildings=buildings,

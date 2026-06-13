@@ -34,8 +34,8 @@ from ming_sim.issues import _format_issue_ongoing
 from ming_sim.session import GameSession
 from ming_sim.session import AUTO_SAVE_PREFIX
 from ming_sim.skills import available_skill_ids, skill_display_name, skill_source_labels
-from ming_sim.flows import calc_province_fiscal
-from ming_sim.models import Character, LLMConfig, monthly_amount
+from ming_sim.flows import compute_budget_lines
+from ming_sim.models import Character, LLMConfig
 
 WEB_DIST = bundled_path("web", "dist")
 # 用户上传的自定义立绘存档级目录（不随 build 清空，git 可忽略）。
@@ -151,23 +151,37 @@ class WebGame:
             db_path = user_data_path("ming_sim.db")
         elif not os.path.isabs(db_path):
             db_path = str(user_data_dir() / db_path)
-        base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-        api_key = os.environ.get("OPENAI_API_KEY", "")
-        advanced_model = os.environ.get("OPENAI_ADVANCED_MODEL", "")
-        advanced_base_url = os.environ.get("OPENAI_ADVANCED_BASE_URL", "")
-        advanced_api_key = os.environ.get("OPENAI_ADVANCED_API_KEY", "")
-        timeout_seconds = float(os.environ.get("OPENAI_TIMEOUT_SECONDS", "180") or 180)
-        # 菜单写的 runtime_llm.json 优先于 env，让"在网页里改的配置"重启后仍生效。
         runtime = load_runtime_llm()
-        base_url = runtime.get("base_url") or base_url
-        model = runtime.get("model") or model
-        api_key = runtime.get("api_key") or api_key
-        advanced_model = runtime.get("advanced_model") or advanced_model
-        advanced_base_url = runtime.get("advanced_base_url") or advanced_base_url
-        advanced_api_key = runtime.get("advanced_api_key") or advanced_api_key
+        # .env / shell env 优先；网页设置保存的 runtime_llm.json 只作兜底。
+        base_url = (
+            (os.environ.get("OPENAI_BASE_URL") or "").strip()
+            or runtime.get("base_url")
+            or "https://api.openai.com/v1"
+        )
+        model = (
+            (os.environ.get("OPENAI_MODEL") or "").strip()
+            or runtime.get("model")
+            or "gpt-4o-mini"
+        )
+        api_key = (os.environ.get("OPENAI_API_KEY") or "").strip() or runtime.get("api_key", "")
+        advanced_model = (
+            (os.environ.get("OPENAI_ADVANCED_MODEL") or "").strip()
+            or runtime.get("advanced_model", "")
+        )
+        advanced_base_url = (
+            (os.environ.get("OPENAI_ADVANCED_BASE_URL") or "").strip()
+            or runtime.get("advanced_base_url", "")
+        )
+        advanced_api_key = (
+            (os.environ.get("OPENAI_ADVANCED_API_KEY") or "").strip()
+            or runtime.get("advanced_api_key", "")
+        )
         max_tokens = int(runtime.get("max_tokens") or 8000)
-        timeout_seconds = float(runtime.get("timeout_seconds") or timeout_seconds)
+        timeout_seconds = float(
+            (os.environ.get("OPENAI_TIMEOUT_SECONDS") or "").strip()
+            or runtime.get("timeout_seconds")
+            or 180
+        )
         if not api_key:
             raise LLMUnavailable("未配 API key，请先到设置页填写。")
         random.seed(int(os.environ.get("MING_SIM_SEED", "7")))
@@ -575,65 +589,9 @@ class WebGame:
         return payloads
 
     def budget_payload(self) -> Dict[str, Any]:
-        cfg = self.db.get_fiscal_config()
-        army_total = self.db.conn.execute("SELECT SUM(maintenance_per_turn) FROM armies").fetchone()[0] or 0
-
-        def rated(base: int, rate_key: str) -> int:
-            return monthly_amount(round(int(base) * cfg.get(rate_key, 100) / 100))
-
-        # 用动态省级财政模型预测本月国库收入（与实际结算算法一致）
-        guo_income_est, _nei_income_est, _province_details = calc_province_fiscal(self.state, self.db)
-
-        budget = {
-            "国库": {
-                "balance": int(self.state.metrics["国库"]),
-                "income": [
-                    {"name": "田赋辽饷盐商", "amount": int(guo_income_est), "note": "各省田赋+辽饷+盐税+商税（按腐败度/士绅阻力/民变动态折算）"},
-                ],
-                "expense": [
-                    {"name": "各军军饷", "amount": int(army_total), "note": "各军月度维护/军饷合计"},
-                    {"name": "宗室禄米", "amount": rated(cfg.get("宗室禄米_base", 80), "宗室禄米_rate"), "note": "诸藩宗室月禄米"},
-                    {"name": "百官俸禄", "amount": rated(cfg.get("官俸_base", 35), "官俸_rate"), "note": "在京百官月俸禄"},
-                    {"name": "工部", "amount": rated(cfg.get("工程_base", 22), "工程_rate"), "note": "工部月维护支出"},
-                    {"name": "赈灾备用", "amount": rated(cfg.get("赈灾_base", 25), "赈灾_rate"), "note": "制度性赈灾预留"},
-                ],
-            },
-            "内库": {
-                "balance": int(self.state.metrics["内库"]),
-                "income": [
-                    {"name": "皇庄", "amount": rated(cfg.get("皇庄_base", 60), "皇庄_rate"), "note": "皇庄地租月上缴"},
-                    {"name": "织造", "amount": rated(cfg.get("织造_base", 35), "织造_rate"), "note": "苏杭织造局月上缴"},
-                    {"name": "矿税", "amount": rated(cfg.get("矿税_base", 10), "矿税_rate"), "note": "矿税残余"},
-                ],
-                "expense": [
-                    {"name": "宫廷开支", "amount": rated(cfg.get("宫廷_base", 18), "宫廷_rate"), "note": "皇室日常用度"},
-                    {"name": "内廷俸禄", "amount": rated(cfg.get("内廷俸_base", 12), "内廷俸_rate"), "note": "太监宫女俸禄"},
-                    {"name": "妃嫔供奉", "amount": rated(cfg.get("妃嫔_base", 8), "妃嫔_rate"), "note": "后宫妃嫔月供奉"},
-                ],
-            },
-        }
-        # 建筑产出/维护并入内库固定栏（按当前 condition 折算的月预算）
-        building_rows = self.db.conn.execute(
-            "SELECT name, category, condition, maintenance, output_metric, output_amount FROM buildings"
-        ).fetchall()
-        bld_produce_by_acc: dict[str, int] = {"国库": 0, "内库": 0}
-        bld_maintain_by_acc: dict[str, int] = {"国库": 0, "内库": 0}
-        for br in building_rows:
-            cond = max(0, min(100, int(br["condition"])))
-            out_acc = str(br["output_metric"] or "")
-            if out_acc in ("国库", "内库") and br["output_amount"]:
-                bld_produce_by_acc[out_acc] += round(int(br["output_amount"]) * cond / 100)
-            maint_acc = "内库" if str(br["category"] or "") == "内廷" else "国库"
-            bld_maintain_by_acc[maint_acc] += max(0, int(br["maintenance"]))
+        budget = compute_budget_lines(self.db, self.state)
         for acc in ("国库", "内库"):
-            if bld_produce_by_acc[acc] > 0:
-                budget[acc]["income"].append(
-                    {"name": "建筑产出", "amount": bld_produce_by_acc[acc], "note": "建筑月产出"}
-                )
-            if bld_maintain_by_acc[acc] > 0:
-                budget[acc]["expense"].append(
-                    {"name": "建筑维护", "amount": bld_maintain_by_acc[acc], "note": "建筑月维护"}
-                )
+            budget[acc]["balance"] = int(self.state.metrics[acc])
         for account in budget.values():
             income_total = sum(int(item["amount"]) for item in account["income"])
             expense_total = sum(int(item["amount"]) for item in account["expense"])
@@ -649,7 +607,7 @@ class WebGame:
             "田赋辽饷盐商", "田赋", "辽饷", "盐税", "商税",
             "各军军饷", "宗室禄米", "百官俸禄", "工部", "赈灾备用",
             # 内库固定
-            "皇庄", "织造", "矿税",
+            "皇庄", "省级皇庄", "织造", "矿税",
             "宫廷开支", "内廷俸禄", "妃嫔供奉",
             # 建筑（固定 tick）
             "建筑产出", "建筑维护",
@@ -693,6 +651,7 @@ class WebGame:
             "treasury": self.db.treasury_report(self.state),
             "issues": self.issue_payloads(),
             "closed_this_turn": self.closed_this_turn_payloads(),
+            "legacies": self.db.legacy_payload(self.state),
             "budget": self.budget_payload(),
             "region_warning": self.db.region_report(limit=5),
             "army_warning": self.db.army_report(limit=5),
@@ -996,20 +955,30 @@ def _has_main_db() -> bool:
 async def api_menu_status() -> Dict[str, Any]:
     """菜单页状态：API key 是否配好、上次主 DB 是否存在、存档列表。"""
     runtime = load_runtime_llm()
-    has_api_key = bool(runtime.get("api_key") or os.environ.get("OPENAI_API_KEY"))
+    env_api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    has_api_key = bool(env_api_key or runtime.get("api_key"))
     return {
         "has_api_key": has_api_key,
         "has_running_game": web_game is not None,
         "has_main_db": _has_main_db(),
         "saves": _scan_saves(),
         "llm": {
-            "base_url": runtime.get("base_url") or os.environ.get("OPENAI_BASE_URL", ""),
-            "model": runtime.get("model") or os.environ.get("OPENAI_MODEL", ""),
+            "base_url": (os.environ.get("OPENAI_BASE_URL") or "").strip() or runtime.get("base_url", ""),
+            "model": (os.environ.get("OPENAI_MODEL") or "").strip() or runtime.get("model", ""),
             "has_api_key": has_api_key,
             "max_tokens": int(runtime.get("max_tokens") or 8000),
-            "advanced_model": runtime.get("advanced_model") or os.environ.get("OPENAI_ADVANCED_MODEL", ""),
-            "advanced_base_url": runtime.get("advanced_base_url") or os.environ.get("OPENAI_ADVANCED_BASE_URL", ""),
-            "has_advanced_api_key": bool(runtime.get("advanced_api_key") or os.environ.get("OPENAI_ADVANCED_API_KEY")),
+            "advanced_model": (
+                (os.environ.get("OPENAI_ADVANCED_MODEL") or "").strip()
+                or runtime.get("advanced_model", "")
+            ),
+            "advanced_base_url": (
+                (os.environ.get("OPENAI_ADVANCED_BASE_URL") or "").strip()
+                or runtime.get("advanced_base_url", "")
+            ),
+            "has_advanced_api_key": bool(
+                (os.environ.get("OPENAI_ADVANCED_API_KEY") or "").strip()
+                or runtime.get("advanced_api_key")
+            ),
         },
     }
 
@@ -1123,13 +1092,13 @@ async def api_menu_save_llm(request: LlmSetupRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="base_url / model 不能为空。")
     if not api_key:
         existing = load_runtime_llm()
-        api_key = existing.get("api_key") or os.environ.get("OPENAI_API_KEY", "")
+        api_key = (os.environ.get("OPENAI_API_KEY") or "").strip() or existing.get("api_key", "")
     if not api_key:
         raise HTTPException(status_code=400, detail="api_key 未配置，请填写。")
     # advanced_api_key 留空：复用已存的（避免覆盖成空）。
     if advanced_model and not advanced_api_key:
         existing = load_runtime_llm()
-        advanced_api_key = existing.get("advanced_api_key") or os.environ.get("OPENAI_ADVANCED_API_KEY", "")
+        advanced_api_key = (os.environ.get("OPENAI_ADVANCED_API_KEY") or "").strip() or existing.get("advanced_api_key", "")
     normalized_base_url = normalize_openai_base_url(base_url)
     config = LLMConfig(
         api_key=api_key,
