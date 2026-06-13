@@ -96,6 +96,8 @@ def _verify_llm_configs_or_raise(config: LLMConfig) -> None:
         model=advanced_model,
         max_tokens=config.max_tokens,
         timeout_seconds=config.timeout_seconds,
+        connect_timeout_seconds=config.connect_timeout_seconds,
+        read_timeout_seconds=config.read_timeout_seconds,
         advanced_model=config.advanced_model,
         advanced_base_url=config.advanced_base_url,
         advanced_api_key=config.advanced_api_key,
@@ -182,6 +184,16 @@ class WebGame:
             or runtime.get("timeout_seconds")
             or 180
         )
+        connect_timeout_seconds = float(
+            (os.environ.get("OPENAI_CONNECT_TIMEOUT_SECONDS") or "").strip()
+            or runtime.get("connect_timeout_seconds")
+            or 60
+        )
+        read_timeout_seconds = float(
+            (os.environ.get("OPENAI_READ_TIMEOUT_SECONDS") or "").strip()
+            or runtime.get("read_timeout_seconds")
+            or 120
+        )
         if not api_key:
             raise LLMUnavailable("未配 API key，请先到设置页填写。")
         random.seed(int(os.environ.get("MING_SIM_SEED", "7")))
@@ -196,6 +208,8 @@ class WebGame:
             model=model,
             max_tokens=max_tokens,
             timeout_seconds=timeout_seconds,
+            connect_timeout_seconds=connect_timeout_seconds,
+            read_timeout_seconds=read_timeout_seconds,
             advanced_model=(advanced_model or "").strip(),
             advanced_base_url=normalize_openai_base_url(adv_base) if adv_base else "",
             advanced_api_key=(advanced_api_key or "").strip(),
@@ -311,6 +325,8 @@ class WebGame:
         api_key: str,
         max_tokens: int = 0,
         timeout_seconds: float = 0,
+        connect_timeout_seconds: float = 0,
+        read_timeout_seconds: float = 0,
         advanced_model: Optional[str] = None,
         advanced_base_url: Optional[str] = None,
         advanced_api_key: Optional[str] = None,
@@ -320,6 +336,16 @@ class WebGame:
         new_key = api_key.strip() or self.session.llm_config.api_key
         new_max = max_tokens if max_tokens > 0 else self.session.llm_config.max_tokens
         new_timeout = timeout_seconds if timeout_seconds > 0 else self.session.llm_config.timeout_seconds
+        new_connect_timeout = (
+            connect_timeout_seconds
+            if connect_timeout_seconds > 0
+            else self.session.llm_config.connect_timeout_seconds
+        )
+        new_read_timeout = (
+            read_timeout_seconds
+            if read_timeout_seconds > 0
+            else self.session.llm_config.read_timeout_seconds
+        )
         # advanced_* = None 表示不动；传空串表示显式清空。
         if advanced_model is None:
             new_advanced = self.session.llm_config.advanced_model
@@ -340,6 +366,8 @@ class WebGame:
             model=new_model,
             max_tokens=new_max,
             timeout_seconds=new_timeout,
+            connect_timeout_seconds=new_connect_timeout,
+            read_timeout_seconds=new_read_timeout,
             advanced_model=new_advanced,
             advanced_base_url=new_adv_base,
             advanced_api_key=new_adv_key,
@@ -351,6 +379,8 @@ class WebGame:
             new_config.api_key,
             new_config.max_tokens,
             new_config.timeout_seconds,
+            new_config.connect_timeout_seconds,
+            new_config.read_timeout_seconds,
             new_config.advanced_model,
             new_config.advanced_base_url,
             new_config.advanced_api_key,
@@ -967,6 +997,21 @@ async def api_menu_status() -> Dict[str, Any]:
             "model": (os.environ.get("OPENAI_MODEL") or "").strip() or runtime.get("model", ""),
             "has_api_key": has_api_key,
             "max_tokens": int(runtime.get("max_tokens") or 8000),
+            "timeout_seconds": float(
+                (os.environ.get("OPENAI_TIMEOUT_SECONDS") or "").strip()
+                or runtime.get("timeout_seconds")
+                or 180
+            ),
+            "connect_timeout_seconds": float(
+                (os.environ.get("OPENAI_CONNECT_TIMEOUT_SECONDS") or "").strip()
+                or runtime.get("connect_timeout_seconds")
+                or 60
+            ),
+            "read_timeout_seconds": float(
+                (os.environ.get("OPENAI_READ_TIMEOUT_SECONDS") or "").strip()
+                or runtime.get("read_timeout_seconds")
+                or 120
+            ),
             "advanced_model": (
                 (os.environ.get("OPENAI_ADVANCED_MODEL") or "").strip()
                 or runtime.get("advanced_model", "")
@@ -1071,6 +1116,8 @@ class LlmSetupRequest(BaseModel):
     api_key: str
     max_tokens: int = 8000
     timeout_seconds: float = 180
+    connect_timeout_seconds: float = 60
+    read_timeout_seconds: float = 120
     advanced_model: str = ""
     advanced_base_url: str = ""
     advanced_api_key: str = ""
@@ -1088,6 +1135,8 @@ async def api_menu_save_llm(request: LlmSetupRequest) -> Dict[str, Any]:
     advanced_api_key = (request.advanced_api_key or "").strip()
     max_tokens = request.max_tokens if request.max_tokens > 0 else 8000
     timeout_seconds = request.timeout_seconds if request.timeout_seconds > 0 else 180
+    connect_timeout_seconds = request.connect_timeout_seconds if request.connect_timeout_seconds > 0 else 60
+    read_timeout_seconds = request.read_timeout_seconds if request.read_timeout_seconds > 0 else 120
     if not (base_url and model):
         raise HTTPException(status_code=400, detail="base_url / model 不能为空。")
     if not api_key:
@@ -1106,6 +1155,8 @@ async def api_menu_save_llm(request: LlmSetupRequest) -> Dict[str, Any]:
         model=model,
         max_tokens=max_tokens,
         timeout_seconds=timeout_seconds,
+        connect_timeout_seconds=connect_timeout_seconds,
+        read_timeout_seconds=read_timeout_seconds,
         advanced_model=advanced_model,
         advanced_base_url=advanced_base_url,
         advanced_api_key=advanced_api_key,
@@ -1124,6 +1175,8 @@ async def api_menu_save_llm(request: LlmSetupRequest) -> Dict[str, Any]:
         api_key,
         max_tokens,
         timeout_seconds,
+        connect_timeout_seconds,
+        read_timeout_seconds,
         advanced_model,
         advanced_base_url,
         advanced_api_key,
@@ -1136,6 +1189,8 @@ async def api_menu_save_llm(request: LlmSetupRequest) -> Dict[str, Any]:
             "has_api_key": True,
             "max_tokens": max_tokens,
             "timeout_seconds": timeout_seconds,
+            "connect_timeout_seconds": connect_timeout_seconds,
+            "read_timeout_seconds": read_timeout_seconds,
             "advanced_model": advanced_model,
             "advanced_base_url": advanced_base_url,
             "has_advanced_api_key": bool(advanced_api_key),
@@ -1457,6 +1512,8 @@ class LLMConfigRequest(BaseModel):
     api_key: str = ""
     max_tokens: int = 0
     timeout_seconds: float = 0
+    connect_timeout_seconds: float = 0
+    read_timeout_seconds: float = 0
     # None=不动，""=显式清空，其他=覆写。pydantic v1 默认 None 走不进来；用 sentinel "__keep__"
     advanced_model: str = "__keep__"
     advanced_base_url: str = "__keep__"
@@ -1534,6 +1591,8 @@ async def api_get_llm_config() -> Dict[str, Any]:
         "model": cfg.model,
         "max_tokens": cfg.max_tokens,
         "timeout_seconds": cfg.timeout_seconds,
+        "connect_timeout_seconds": cfg.connect_timeout_seconds,
+        "read_timeout_seconds": cfg.read_timeout_seconds,
         "advanced_model": cfg.advanced_model,
         "advanced_base_url": cfg.advanced_base_url,
         "has_advanced_api_key": bool(cfg.advanced_api_key),
@@ -1544,6 +1603,8 @@ async def api_get_llm_config() -> Dict[str, Any]:
             "has_api_key": bool(saved.get("api_key", "")),
             "max_tokens": int(saved.get("max_tokens") or 8000),
             "timeout_seconds": float(saved.get("timeout_seconds") or 180),
+            "connect_timeout_seconds": float(saved.get("connect_timeout_seconds") or 60),
+            "read_timeout_seconds": float(saved.get("read_timeout_seconds") or 120),
             "advanced_model": saved.get("advanced_model", ""),
             "advanced_base_url": saved.get("advanced_base_url", ""),
             "has_advanced_api_key": bool(saved.get("advanced_api_key", "")),
@@ -1563,6 +1624,8 @@ async def api_set_llm_config(request: LLMConfigRequest) -> Dict[str, Any]:
             request.api_key,
             request.max_tokens,
             request.timeout_seconds,
+            request.connect_timeout_seconds,
+            request.read_timeout_seconds,
             advanced_model=advanced,
             advanced_base_url=adv_base,
             advanced_api_key=adv_key,
@@ -1576,6 +1639,8 @@ async def api_set_llm_config(request: LLMConfigRequest) -> Dict[str, Any]:
         "model": cfg.model,
         "max_tokens": cfg.max_tokens,
         "timeout_seconds": cfg.timeout_seconds,
+        "connect_timeout_seconds": cfg.connect_timeout_seconds,
+        "read_timeout_seconds": cfg.read_timeout_seconds,
         "advanced_model": cfg.advanced_model,
         "advanced_base_url": cfg.advanced_base_url,
         "has_advanced_api_key": bool(cfg.advanced_api_key),

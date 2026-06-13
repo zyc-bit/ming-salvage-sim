@@ -804,30 +804,25 @@ class GameDB:
             ("妃嫔_base",    10,  "base", "后宫妃嫔季度供奉，万两"),
             ("妃嫔_rate",   100,  "rate", "妃嫔供奉率%"),
         ]
-        # schema 版本：旧 DB 用 INSERT OR IGNORE 保留玩家中途的 set_fiscal_config 改动；
-        # 默认值整体重平衡时升 SCHEMA_VERSION，旧库走 UPDATE 路径全量覆盖。
+        # schema 版本：同版本读档不补默认行，避免玩家裁撤的科目被复活；
+        # 旧库升版只补缺省键，不覆盖玩家中途改过的 set_fiscal_config 值。
         SCHEMA_VERSION = 5
         cur_ver_row = self.conn.execute(
             "SELECT value FROM fiscal_config WHERE key = '__schema_version'"
         ).fetchone()
         cur_ver = int(cur_ver_row["value"]) if cur_ver_row else 0
+        if cur_ver >= SCHEMA_VERSION:
+            return
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO fiscal_config (key, value, kind, note) VALUES (?, ?, ?, ?)",
+            rows,
+        )
         if cur_ver < SCHEMA_VERSION:
-            for key, value, kind, note in rows:
-                self.conn.execute(
-                    "INSERT INTO fiscal_config (key, value, kind, note) VALUES (?, ?, ?, ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, note=excluded.note",
-                    (key, value, kind, note),
-                )
             self.conn.execute(
                 "INSERT INTO fiscal_config (key, value, kind, note) VALUES "
-                "('__schema_version', ?, 'meta', '财政默认值大版本号，升即重置玩家未改动的默认值') "
+                "('__schema_version', ?, 'meta', '财政默认值大版本号；升版只补缺省键') "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (SCHEMA_VERSION,),
-            )
-        else:
-            self.conn.executemany(
-                "INSERT OR IGNORE INTO fiscal_config (key, value, kind, note) VALUES (?, ?, ?, ?)",
-                rows,
             )
         self.conn.commit()
 

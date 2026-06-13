@@ -46,6 +46,8 @@ def load_llm_config(
     model: str,
     api_key: str = "",
     timeout_seconds: float = 180.0,
+    connect_timeout_seconds: float = 60.0,
+    read_timeout_seconds: float = 120.0,
     advanced_model: str = "",
     advanced_base_url: str = "",
     advanced_api_key: str = "",
@@ -61,6 +63,8 @@ def load_llm_config(
         base_url=normalize_openai_base_url(base_url),
         model=model,
         timeout_seconds=timeout_seconds,
+        connect_timeout_seconds=connect_timeout_seconds,
+        read_timeout_seconds=read_timeout_seconds,
         advanced_model=(advanced_model or "").strip(),
         advanced_base_url=normalize_openai_base_url(adv_base) if adv_base else "",
         advanced_api_key=(advanced_api_key or "").strip(),
@@ -85,6 +89,8 @@ def for_role(cfg: LLMConfig, role: str) -> LLMConfig:
             model=cfg.advanced_model.strip(),
             max_tokens=cfg.max_tokens,
             timeout_seconds=cfg.timeout_seconds,
+            connect_timeout_seconds=cfg.connect_timeout_seconds,
+            read_timeout_seconds=cfg.read_timeout_seconds,
             advanced_model=cfg.advanced_model,
             advanced_base_url=cfg.advanced_base_url,
             advanced_api_key=cfg.advanced_api_key,
@@ -111,6 +117,10 @@ def load_runtime_llm() -> Dict[str, str]:
         out["max_tokens"] = str(data["max_tokens"])
     if "timeout_seconds" in data:
         out["timeout_seconds"] = str(data["timeout_seconds"])
+    if "connect_timeout_seconds" in data:
+        out["connect_timeout_seconds"] = str(data["connect_timeout_seconds"])
+    if "read_timeout_seconds" in data:
+        out["read_timeout_seconds"] = str(data["read_timeout_seconds"])
     return out
 
 
@@ -120,6 +130,8 @@ def save_runtime_llm(
     api_key: str,
     max_tokens: int = 8000,
     timeout_seconds: float = 180.0,
+    connect_timeout_seconds: float = 60.0,
+    read_timeout_seconds: float = 120.0,
     advanced_model: str = "",
     advanced_base_url: str = "",
     advanced_api_key: str = "",
@@ -132,6 +144,8 @@ def save_runtime_llm(
         "api_key": (api_key or "").strip(),
         "max_tokens": max_tokens,
         "timeout_seconds": timeout_seconds,
+        "connect_timeout_seconds": connect_timeout_seconds,
+        "read_timeout_seconds": read_timeout_seconds,
         "advanced_model": (advanced_model or "").strip(),
         "advanced_base_url": (advanced_base_url or "").strip(),
         "advanced_api_key": (advanced_api_key or "").strip(),

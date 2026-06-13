@@ -18,6 +18,8 @@ class LLMConfig:
     model: str
     max_tokens: int = 8000
     timeout_seconds: float = 180.0
+    connect_timeout_seconds: float = 60.0
+    read_timeout_seconds: float = 120.0
     advanced_model: str = ""  # 空=fallback model；非空=推演/打分专用更强模型（如 deepseek-reasoner / gpt-5）
     advanced_base_url: str = ""  # 空=复用主 base_url；非空=advanced 角色专用网关
     advanced_api_key: str = ""  # 空=复用主 api_key；非空=advanced 角色专用 key

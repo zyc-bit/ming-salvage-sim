@@ -271,6 +271,8 @@ type LLMConfigInfo = {
   model: string;
   max_tokens: number;
   timeout_seconds: number;
+  connect_timeout_seconds: number;
+  read_timeout_seconds: number;
   advanced_model: string;
   advanced_base_url: string;
   has_advanced_api_key: boolean;
@@ -281,6 +283,8 @@ type LLMConfigInfo = {
     has_api_key: boolean;
     max_tokens: number;
     timeout_seconds: number;
+    connect_timeout_seconds: number;
+    read_timeout_seconds: number;
     advanced_model: string;
     advanced_base_url: string;
     has_advanced_api_key: boolean;
@@ -555,6 +559,8 @@ type MenuStatus = {
     has_api_key: boolean;
     max_tokens: number;
     timeout_seconds: number;
+    connect_timeout_seconds: number;
+    read_timeout_seconds: number;
     advanced_model: string;
     advanced_base_url: string;
     has_advanced_api_key: boolean;
@@ -2955,6 +2961,8 @@ function LLMConfigTab() {
   const [apiKey, setApiKey] = React.useState("");
   const [maxTokens, setMaxTokens] = React.useState("8000");
   const [timeoutSeconds, setTimeoutSeconds] = React.useState("180");
+  const [connectTimeoutSeconds, setConnectTimeoutSeconds] = React.useState("60");
+  const [readTimeoutSeconds, setReadTimeoutSeconds] = React.useState("120");
   const [show, setShow] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [msg, setMsg] = React.useState("");
@@ -2970,6 +2978,8 @@ function LLMConfigTab() {
         setAdvancedBaseUrl(data.advanced_base_url || "");
         setMaxTokens(String(data.max_tokens || 8000));
         setTimeoutSeconds(String(data.timeout_seconds || 180));
+        setConnectTimeoutSeconds(String(data.connect_timeout_seconds || 60));
+        setReadTimeoutSeconds(String(data.read_timeout_seconds || 120));
       })
       .catch((e) => setErr(e instanceof Error ? e.message : String(e)));
   }, []);
@@ -2987,6 +2997,8 @@ function LLMConfigTab() {
           api_key: apiKey,
           max_tokens: parseInt(maxTokens) || 8000,
           timeout_seconds: parseFloat(timeoutSeconds) || 180,
+          connect_timeout_seconds: parseFloat(connectTimeoutSeconds) || 60,
+          read_timeout_seconds: parseFloat(readTimeoutSeconds) || 120,
           advanced_model: advancedModel,
           advanced_base_url: advancedBaseUrl,
           advanced_api_key: advancedApiKey.trim() ? advancedApiKey : "__keep__",
@@ -3085,6 +3097,30 @@ function LLMConfigTab() {
           value={timeoutSeconds}
           onChange={(e) => setTimeoutSeconds(e.target.value)}
           placeholder="180"
+        />
+      </label>
+      <label className="menu-field">
+        <span>Connect Timeout Seconds</span>
+        <input
+          className="menu-input"
+          type="number"
+          min={5}
+          max={300}
+          value={connectTimeoutSeconds}
+          onChange={(e) => setConnectTimeoutSeconds(e.target.value)}
+          placeholder="60"
+        />
+      </label>
+      <label className="menu-field">
+        <span>Read Timeout Seconds</span>
+        <input
+          className="menu-input"
+          type="number"
+          min={5}
+          max={300}
+          value={readTimeoutSeconds}
+          onChange={(e) => setReadTimeoutSeconds(e.target.value)}
+          placeholder="120"
         />
       </label>
       <label className="menu-field">
@@ -3652,6 +3688,7 @@ function ChatModal({
   };
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (event.key !== "Enter" || event.shiftKey) return;
     event.preventDefault();
     onSend(input);
@@ -4291,6 +4328,8 @@ function ApiSettingsModal({
     has_api_key: boolean;
     max_tokens?: number;
     timeout_seconds?: number;
+    connect_timeout_seconds?: number;
+    read_timeout_seconds?: number;
     advanced_model?: string;
     advanced_base_url?: string;
     has_advanced_api_key?: boolean;
@@ -4306,6 +4345,8 @@ function ApiSettingsModal({
   const [apiKey, setApiKey] = React.useState("");
   const [maxTokens, setMaxTokens] = React.useState(String(initial?.max_tokens || 8000));
   const [timeoutSeconds, setTimeoutSeconds] = React.useState(String(initial?.timeout_seconds || 180));
+  const [connectTimeoutSeconds, setConnectTimeoutSeconds] = React.useState(String(initial?.connect_timeout_seconds || 60));
+  const [readTimeoutSeconds, setReadTimeoutSeconds] = React.useState(String(initial?.read_timeout_seconds || 120));
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState("");
 
@@ -4322,6 +4363,8 @@ function ApiSettingsModal({
           api_key: apiKey.trim(),
           max_tokens: parseInt(maxTokens) || 8000,
           timeout_seconds: parseFloat(timeoutSeconds) || 180,
+          connect_timeout_seconds: parseFloat(connectTimeoutSeconds) || 60,
+          read_timeout_seconds: parseFloat(readTimeoutSeconds) || 120,
           advanced_model: advancedModel.trim(),
           advanced_base_url: advancedBaseUrl.trim(),
           advanced_api_key: advancedApiKey.trim(),
@@ -4374,6 +4417,14 @@ function ApiSettingsModal({
         <label>
           Timeout Seconds
           <input type="number" min={10} max={900} value={timeoutSeconds} onChange={(e) => setTimeoutSeconds(e.target.value)} placeholder="180" />
+        </label>
+        <label>
+          Connect Timeout Seconds
+          <input type="number" min={5} max={300} value={connectTimeoutSeconds} onChange={(e) => setConnectTimeoutSeconds(e.target.value)} placeholder="60" />
+        </label>
+        <label>
+          Read Timeout Seconds
+          <input type="number" min={5} max={300} value={readTimeoutSeconds} onChange={(e) => setReadTimeoutSeconds(e.target.value)} placeholder="120" />
         </label>
         <label>
           API Key

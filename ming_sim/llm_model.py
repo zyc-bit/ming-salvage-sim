@@ -91,8 +91,12 @@ def create_chat_model(
         "base_url": llm_config.base_url,
         "temperature": temperature,
         "max_tokens": max_tokens,
-        "timeout": llm_config.timeout_seconds,
-        "max_retries": 1,
+        "timeout": httpx.Timeout(
+            llm_config.timeout_seconds,
+            connect=llm_config.connect_timeout_seconds,
+            read=llm_config.read_timeout_seconds,
+        ),
+        "max_retries": 0,
         "role_map": {"system": "system", "user": "user", "assistant": "assistant", "tool": "tool"},
         "extra_body": extra_body,
     }
