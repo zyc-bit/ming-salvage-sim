@@ -7,6 +7,8 @@ import re
 import httpx
 from openai import OpenAI
 
+from . import world
+
 _client = None
 
 
@@ -32,11 +34,17 @@ def _model():
 def _scene(state):
     cr = state.active_crisis()
     facs = "；".join(f"{f.name}(满意{f.satisfaction}/能量{f.leverage})" for f in state.factions.values())
-    head = (f"【时局】天启七年末,{state.year}年{state.month}月,信王朱由检新承大统。\n"
-            f"【国势】{state.metric_line()}（耳目=情报力)\n"
-            f"【朝局】{facs}")
+    if state.slice_id == "dingwei":
+        head = (f"【时局】天启七年末,{state.year}年{state.month}月,信王朱由检新承大统。\n"
+                f"【国势】{state.metric_line()}（耳目=情报力)\n"
+                f"【朝局】{facs}")
+    else:
+        head = (f"【时局】{state.year}年{state.month}月。\n"
+                f"【国势】{state.metric_line()}（耳目=情报力)\n"
+                f"【朝局】{facs}")
     if cr:
         head += f"\n【当前大事】{cr.title}：{cr.brief}"
+        head += world.backdrop(cr.cast)  # 危机点名了真实地区/军队/势力才追加;否则空串、行为不变
     return head
 
 
@@ -61,31 +69,32 @@ _ADJ_SYS = """你是这局《明末》的天下裁判。皇帝刚下了一道处
 裁判铁律:
 - 君命直贯:人事、刑赏(诛/罢/贬/赦/赏)这类,皇帝一旨即生效,不打折,别写「廷议未决」拖延。
 - 但每个手段都有代价与连锁:按当前国势、势力立场推演谁喜谁怒、得了什么、失了什么。参考【真相】判定,但真相不直接示玩家。
-- 没有最优解:诛魏则皇威/民心涨、东林喜,但厂卫这套耳目体系瘫痪(耳目大跌)、东林借机坐大;留/缓则东林失望、皇威难立,但保住耳目与制衡。犹豫不决最糟——两头不讨好。
+- 没有最优解:每个手段都有代价与连锁,按当前盘面推演谁喜谁怒、得失各几。
 
 只输出一个 JSON(不要任何别的字、不要代码围栏):
 {
  "narrative": "150-300字邸报体叙事,有人有地有冷暖,写出这道旨在京城激起的涟漪与代价",
  "resolved": true,
  "effects": [
-   {"target":"皇威","direction":"+","magnitude":"大","reason":"雷霆定阉,君威立竖"},
-   {"target":"耳目","direction":"-","magnitude":"大","reason":"厂卫清洗,京畿耳目骤失"},
-   {"target":"阉党.satisfaction","direction":"-","magnitude":"极","reason":"魏党树倒"},
-   {"target":"东林.leverage","direction":"+","magnitude":"中","reason":"借势安插"}
+   {"target":"皇威","direction":"+","magnitude":"中","reason":"处置显出决断"},
+   {"target":"国库","direction":"-","magnitude":"轻","reason":"措置耗费钱粮"},
+   {"target":"边事","direction":"+","magnitude":"轻","reason":"边防暂得支撑"}
  ]
 }
 "resolved": 这道旨是否已把『当前大事』了结(true/false)。
 克制原则:effects 聚焦 2-4 个最相关的国势/势力,不必每项都动;同一回合「大」「极」档至多 1-2 项,余者用 中/轻/微 分出主次;维持现状的数值不给 effect(别「按兵不动」却还加分)。
 "effects" 给 2-5 条,正负都要有、体现取舍。target 只能是:
-  国势(国库/皇威/民心/朝堂/耳目)、或『阉党.satisfaction』『东林.leverage』之类势力属性、或『王承恩.loyalty』之类人物属性。
+  国势(国库/皇威/民心/朝堂/耳目/边事)、或当前盘面里的『势力名.satisfaction』『势力名.leverage』、或『人物名.loyalty』。
+reason 一律用中文不夹英文单词。
 magnitude 只能是 微/轻/中/大/极。"""
 
 
 def adjudicate(state, decree, summon_log):
     cr = state.active_crisis()
     truth = f"\n【真相(仅你裁判可见,勿直白示玩家)】{cr.truth}" if cr else ""
+    notes = f"\n【本案裁判要点】{cr.adjudicator_notes}" if cr and cr.adjudicator_notes else ""
     convo = "\n".join(f"[{who}] {text}" for who, text in summon_log) or "(本月未召见臣工)"
-    user = (f"{_scene(state)}{truth}\n\n【本月召对摘要】\n{convo}\n\n"
+    user = (f"{_scene(state)}{truth}{notes}\n\n【本月召对摘要】\n{convo}\n\n"
             f"【皇帝旨意】{decree}\n\n按裁判铁律输出 JSON。")
     r = _c().chat.completions.create(
         model=_model(),

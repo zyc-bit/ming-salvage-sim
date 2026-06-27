@@ -3,7 +3,7 @@
 关键:LLM 给方向与档位(定性)+ 叙事,代码做档位→数值的唯一映射。
 单层 LLM、不反向从叙事里抠数字 —— 这是 v2 区别于旧架构的核心。
 """
-from state import GameState
+from .state import GameState
 
 MAGNITUDE = {"微": 3, "轻": 6, "中": 12, "大": 22, "极": 40}
 

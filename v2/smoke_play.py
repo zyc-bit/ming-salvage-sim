@@ -1,16 +1,14 @@
 """非交互自动跑通《定魏》一局,打详细后端日志,确认 LLM 链路走通。
    set -a; source .env; set +a
-   .venv/bin/python v2/smoke_play.py
+   python -m v2.smoke_play
 """
-import sys
 import os
 import time
 import traceback
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from content import new_game            # noqa: E402
-from engine import apply_effects        # noqa: E402
-import llm                              # noqa: E402
+from .content import new_game
+from .engine import apply_effects
+from . import llm
 
 
 def log(msg=""):

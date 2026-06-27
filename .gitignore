@@ -47,6 +47,7 @@ htmlcov/
 # Frontend
 web/node_modules/
 web/dist/
+web/dist-v2/
 web/tsconfig.tsbuildinfo
 .vscode/
 
@@ -55,3 +56,9 @@ web/public/portraits/_backup_rgb/
 
 AGENTS.md
 CLAUDE.md
+
+# 根目录散落截图(勿入库)
+/*.png
+# 图片冗余备份(水印草稿/原稿)
+*.wm.png
+*.original.png

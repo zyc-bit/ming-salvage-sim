@@ -1,6 +1,6 @@
 """《明末》v2 — 状态模型。
 
-新架构三铁律(见 README):
+新架构三铁律(见 v2/README.md):
 1) 极简底层:几个国势 + 几股势力 + 人物 + 危机,深度来自联动不来自维度。
 2) LLM 只当「嘴」与「裁判」,代码管状态机与数值,边界清晰、不互相翻译。
 3) 信息不全 / 君命直贯 / 没有最优解 / 后果连锁,从第一刀就缝在一起。
@@ -8,8 +8,8 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 
-# 五个国势(0-100)。「耳目」= 皇帝的情报获取力,诛厂卫会掉它 → 信息迷雾机制化。
-METRIC_KEYS = ["国库", "皇威", "民心", "朝堂", "耳目"]
+# 国势(0-100)。「耳目」= 皇帝的情报获取力,诛厂卫会掉它 → 信息迷雾机制化。
+METRIC_KEYS = ["国库", "皇威", "民心", "朝堂", "耳目", "边事"]
 
 
 @dataclass
@@ -39,18 +39,21 @@ class Crisis:
     title: str
     brief: str          # 皇帝所知(可能不全/被粉饰)
     truth: str          # 真相(隐藏;只喂给裁判 LLM,不直接示玩家)
+    adjudicator_notes: str = ""
     resolved: bool = False
+    cast: list = field(default_factory=list)  # 点名涉及的真实地区/军队/势力(id 或 name),只读背景
 
 
 @dataclass
 class GameState:
     year: int
     month: int
-    energy: int
     metrics: dict
     factions: dict
     characters: dict
     crises: list
+    event_pool: list = field(default_factory=list)  # 尚未入队的事件 dict 列表
+    slice_id: str = "dingwei"
     chronicle: list = field(default_factory=list)
 
     def metric_line(self) -> str:

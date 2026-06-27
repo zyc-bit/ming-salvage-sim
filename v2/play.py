@@ -1,75 +1,41 @@
-"""《崇祯元年·定魏》终端原型。从项目根跑:
+"""《明末》v2 终端原型。从项目根跑:
    set -a; source .env; set +a
-   python3 v2/play.py
+   python -m v2.play
 """
-import sys
 import os
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from content import new_game            # noqa: E402
-from engine import apply_effects        # noqa: E402
-import llm                              # noqa: E402
-
-LINE = "─" * 58
-
-
-def banner():
-    print(LINE)
-    print("《明末·崇祯元年 —— 定魏》   第一垂直切片")
-    print("天启七年十一月,信王朱由检入承大统。魏忠贤犹掌司礼监、东厂。")
-    print("你是崇祯。登基第一道大题:这权倾朝野的九千岁,你怎么办?")
-    print(LINE)
-
-
-def show_full(state):
-    """每月开头的完整御案:国势 + 势力 + 当前危机。"""
-    cr = state.active_crisis()
-    print(f"\n{LINE}\n崇祯元年{state.month}月    精力 {state.energy}")
-    print(f"国势  {state.metric_line()}    (耳目=情报力,越低越看不清天下)")
-    for f in state.factions.values():
-        print(f"   {f.name}：满意{f.satisfaction}  能量{f.leverage}")
-    if cr:
-        print(f"\n◆ {cr.title}\n  {cr.brief}")
-    print(LINE)
+from .content import new_game
+from .events import next_from_pool
+from .engine import apply_effects
+from . import llm
+from .present import LINE, banner, show_full, _verdict
 
 
 def show_brief(state):
-    """月内操作后的简短刷新:只一行国势 + 精力,不重打危机长描述。"""
-    print(f"\n国势  {state.metric_line()}    精力 {state.energy}")
+    """月内操作后的简短刷新:只一行国势,不重打危机长描述。"""
+    print(f"\n国势  {state.metric_line()}")
 
 
-def _verdict(state) -> str:
-    """据终局国势写一段有层次的史评。"""
-    m = state.metrics
-    dl = state.factions["东林"].leverage
-    yan = state.factions["阉党"].satisfaction
-    lines = []
-    if yan > 35:
-        lines.append("魏阉终未除尽、余焰犹存——这第一道考题,你避而未答,后患埋于今日。")
-    elif m["皇威"] < 30:
-        lines.append("魏虽除,君威却未立、朝野观望;雷霆不济,反伤天子之断。")
-    else:
-        lines.append("一举而权阉倒、君威立,这登基第一刀,你砍得干净利落。")
-    if m["耳目"] < 40:
-        lines.append("然厂卫尽废、耳目失聪,自此地方奏报真伪难辨——信息的迷雾,已悄然笼罩这位最勤政的君王。")
-    elif m["耳目"] < 55:
-        lines.append("厂卫虽存、元气已伤,京畿耳目不复旧日之灵便。")
-    else:
-        lines.append("难得的是,你留住了那双替朕看天下的眼睛。")
-    if dl >= 55:
-        lines.append("可东林已借势独大,科道台谏渐成一党之私——除一阉、养一党,党争之患,才刚刚开始。")
-    return "\n".join("  " + s for s in lines)
+def _print_menu(state):
+    names = [name for name, ch in state.characters.items() if ch.active]
+    summon_choices = {str(i): name for i, name in enumerate(names, 1)}
+    decree_choice = str(len(names) + 1)
+    advance_choice = str(len(names) + 2)
+    items = [f"[{i}]召见{name}" for i, name in summon_choices.items()]
+    items += [f"[{decree_choice}]下旨处置", f"[{advance_choice}]退朝·推演本月"]
+    print("\n" + "  ".join(items))
+    return summon_choices, decree_choice, advance_choice
 
 
 def main():
     if not os.environ.get("OPENAI_API_KEY"):
         print("缺 OPENAI_API_KEY。先在项目根 `set -a; source .env; set +a` 再跑。")
         return
-    state = new_game()
+    state = new_game(os.environ.get("MING_SLICE", "dingwei"))
     summon_log = []          # 本月召对摘要(喂裁判)
     history = {}             # name -> [(role, text)] 跨月保留,大臣记得你说过的话
     month_decree = None
-    banner()
+    banner(state)
     shown_month = None
     while True:
         cr = state.active_crisis()
@@ -80,13 +46,10 @@ def main():
             shown_month = state.month
         else:                                # 月内:只刷新一行国势,不重打危机长描述
             show_brief(state)
-        print("\n[1]召见王承恩  [2]召见韩爌  [3]召见魏忠贤  [4]下旨处置  [5]退朝·推演本月")
+        summon_choices, decree_choice, advance_choice = _print_menu(state)
         choice = input("朕意> ").strip()
-        if choice in ("1", "2", "3"):
-            name = {"1": "王承恩", "2": "韩爌", "3": "魏忠贤"}[choice]
-            if state.energy <= 0:
-                print("(精力已尽,本月无力再召,且退朝吧)")
-                continue
+        if choice in summon_choices:
+            name = summon_choices[choice]
             q = input(f"朕问{name}> ").strip()
             if not q:
                 continue
@@ -100,13 +63,12 @@ def main():
             print(f"\n{name}：{reply}\n")
             hist += [("帝", q), (name, reply)]
             summon_log += [(f"帝问{name}", q), (name, reply)]
-            state.energy -= 1
-        elif choice == "4":
+        elif choice == decree_choice:
             d = input("拟旨> ").strip()
             if d:
                 month_decree = d
                 print("(旨意已拟,退朝时颁行天下)")
-        elif choice == "5":
+        elif choice == advance_choice:
             if not month_decree:
                 if input("尚未下旨,空过本月?(y/N)> ").strip().lower() != "y":
                     continue
@@ -125,17 +87,26 @@ def main():
             state.chronicle.append(res.get("narrative", ""))
             if res.get("resolved"):
                 cr.resolved = True
+                nxt = next_from_pool(state)
+                if nxt:
+                    state.crises.append(nxt)
             month_decree = None
             summon_log = []
             state.month += 1
-            state.energy = 3
         else:
-            print("(请输入 1-5)")
+            print(f"(请输入 1-{advance_choice})")
 
-    print(f"\n{LINE}\n【史册 · 定魏一节】")
-    print(f"崇祯于元年{state.month}月定魏案。其后国势:{state.metric_line()}\n")
+    section = "辽东索饷" if state.slice_id == "liaodong" else "定魏"
+    print(f"\n{LINE}\n【史册 · {section}一节】")
+    if state.slice_id == "liaodong":
+        print(f"崇祯于{state.year}年{state.month}月处置辽东索饷。其后国势:{state.metric_line()}\n")
+    else:
+        print(f"崇祯于元年{state.month}月定魏案。其后国势:{state.metric_line()}\n")
     print(_verdict(state))
-    print("\n(第一垂直切片到此。下一刀:辽东索饷。)")
+    if state.slice_id == "liaodong":
+        print("\n(第二垂直切片到此。)")
+    else:
+        print("\n(第一垂直切片到此。下一刀:辽东索饷。)")
     print(LINE)
 
 
